@@ -1,4 +1,4 @@
-module maniakalen/crawler
+module github.com/maniakalen/crawler
 
 go 1.23.1
 
