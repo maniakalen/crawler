@@ -1,3 +1,4 @@
+// Package crawler provides functionalities to crawl a given website's pages
 package crawler
 
 import (
@@ -11,6 +12,7 @@ import (
 	"golang.org/x/net/html"
 )
 
+// Crawler is the main package object used to initialize the crawl
 type Crawler struct {
 	root         *url.URL
 	client       *http.Client
@@ -19,14 +21,17 @@ type Crawler struct {
 	channels     Channels
 }
 
+// Page is a struct that carries the scanned url, response and response body string
 type Page struct {
-	Url  url.URL
-	Resp http.Response
-	Body string
+	Url  url.URL       // Page url
+	Resp http.Response // Page response as returned from the GET request
+	Body string        // Response body string
 }
 
+// Channels is a Page channels map where the index is the response code so we can define different behavior for the different resp codes
 type Channels map[int]chan Page
 
+// NewCrawler is the crawler inicialization method
 func NewCrawler(urlString string, chans Channels) (*Crawler, error) {
 	urlObject, err := url.Parse(urlString)
 	if err != nil {
@@ -51,6 +56,7 @@ func NewCrawler(urlString string, chans Channels) (*Crawler, error) {
 	return crawler, nil
 }
 
+// Run is the crawler start method
 func (c *Crawler) Run() {
 	done := make(chan bool)
 	go func(u *url.URL) {
