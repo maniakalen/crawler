@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/html"
@@ -58,21 +59,17 @@ func NewCrawler(urlString string, chans Channels) (*Crawler, error) {
 
 // Run is the crawler start method
 func (c *Crawler) Run() {
-	done := make(chan bool)
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func(u *url.URL) {
-		go c.scanUrl(u)
+		defer wg.Done()
+		wg.Add(1)
+		go c.scanUrl(u, &wg)
 		c.scannedItems[u.String()] = true
 		var ur url.URL
 		i := 0
 		for {
-			select {
-			case ur = <-c.urlsChan:
-			case <-time.After(20 * time.Second):
-				fmt.Println("Time elapsed")
-				close(c.urlsChan)
-				close(done)
-				return
-			}
+			ur = <-c.urlsChan
 			i++
 			if i == 100 {
 				<-time.After(200 * time.Millisecond)
@@ -89,13 +86,15 @@ func (c *Crawler) Run() {
 				continue
 			}
 			c.scannedItems[ur.String()] = true
-			go c.scanUrl(&ur)
+			wg.Add(1)
+			go c.scanUrl(&ur, &wg)
 		}
 	}(c.root)
-	<-done
+	wg.Wait()
 }
 
-func (c *Crawler) scanUrl(u *url.URL) error {
+func (c *Crawler) scanUrl(u *url.URL, wg *sync.WaitGroup) error {
+	defer wg.Done()
 	if u.String() != "" && !strings.Contains(u.String(), "javascript:") {
 		resp, err := c.client.Get(u.String())
 		if err != nil {
@@ -116,14 +115,16 @@ func (c *Crawler) scanUrl(u *url.URL) error {
 			if err != nil {
 				return fmt.Errorf("unable to parse page body")
 			}
-			go c.scanNode(doc)
+			wg.Add(1)
+			go c.scanNode(doc, wg)
 		}
 
 	}
 	return nil
 }
 
-func (c *Crawler) scanNode(n *html.Node) {
+func (c *Crawler) scanNode(n *html.Node, wg *sync.WaitGroup) {
+	defer wg.Done()
 	if n.Type == html.ElementNode && n.Data == "a" {
 		for _, a := range n.Attr {
 			if a.Key == "href" {
@@ -135,7 +136,7 @@ func (c *Crawler) scanNode(n *html.Node) {
 		}
 	}
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		c.scanNode(child)
+		go c.scanNode(child, wg)
 	}
 }
 
