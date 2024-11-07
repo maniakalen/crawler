@@ -62,8 +62,6 @@ func (c *Crawler) Run() {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func(u *url.URL) {
-		defer wg.Done()
-		wg.Add(1)
 		go c.scanUrl(u, &wg)
 		c.scannedItems[u.String()] = true
 		var ur url.URL
@@ -136,6 +134,7 @@ func (c *Crawler) scanNode(n *html.Node, wg *sync.WaitGroup) {
 		}
 	}
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
+		wg.Add(1)
 		go c.scanNode(child, wg)
 	}
 }
