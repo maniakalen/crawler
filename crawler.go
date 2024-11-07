@@ -20,6 +20,7 @@ type Crawler struct {
 	scannedItems map[string]bool
 	urlsChan     chan url.URL
 	channels     Channels
+	scanParent   bool
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -33,7 +34,7 @@ type Page struct {
 type Channels map[int]chan Page
 
 // NewCrawler is the crawler inicialization method
-func NewCrawler(urlString string, chans Channels) (*Crawler, error) {
+func NewCrawler(urlString string, chans Channels, parents bool) (*Crawler, error) {
 	urlObject, err := url.Parse(urlString)
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse root url")
@@ -52,6 +53,7 @@ func NewCrawler(urlString string, chans Channels) (*Crawler, error) {
 		channels:     chans,
 		client:       client,
 		scannedItems: map[string]bool{},
+		scanParent:   parents,
 	}
 	crawler.urlsChan = make(chan url.URL)
 	return crawler, nil
@@ -65,14 +67,8 @@ func (c *Crawler) Run() {
 		go c.scanUrl(u, &wg)
 		c.scannedItems[u.String()] = true
 		var ur url.URL
-		i := 0
 		for {
 			ur = <-c.urlsChan
-			i++
-			if i == 100 {
-				<-time.After(200 * time.Millisecond)
-				i = 0
-			}
 			ur, err := c.repairUrl(&ur)
 			if err != nil {
 				continue
@@ -157,6 +153,9 @@ func (c *Crawler) repairUrl(u *url.URL) (url.URL, error) {
 	}
 	if u.Path == "" {
 		u.Path = "/"
+	}
+	if !c.scanParent && !strings.HasPrefix(u.String(), c.root.String()) {
+		return *u, fmt.Errorf("path is parent")
 	}
 	return *u, nil
 
