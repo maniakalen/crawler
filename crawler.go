@@ -87,15 +87,16 @@ func (c *Crawler) Run() {
 				wg.Add(1)
 				go c.scanUrl(&ur, &wg)
 			case <-(*c.ctx).Done():
-				close(c.urlsChan)
-				for _, channel := range c.channels {
-					close(channel)
-				}
 				return
 			}
 		}
 	}(c.root)
 	wg.Wait()
+	close(c.urlsChan)
+	for idx, channel := range c.channels {
+		close(channel)
+		delete(c.channels, idx)
+	}
 }
 
 func (c *Crawler) scanUrl(u *url.URL, wg *sync.WaitGroup) error {
@@ -113,7 +114,11 @@ func (c *Crawler) scanUrl(u *url.URL, wg *sync.WaitGroup) error {
 		}
 		if channel, exists := c.channels[resp.StatusCode]; exists {
 			page := Page{Url: *u, Resp: *resp, Body: string(body)}
-			channel <- page
+			select {
+			case channel <- page:
+			case <-(*c.ctx).Done():
+				return fmt.Errorf("closed")
+			}
 		}
 		if strings.HasPrefix(resp.Header["Content-Type"][0], "text/html") {
 			doc, err := html.Parse(bodyReader)
@@ -134,7 +139,11 @@ func (c *Crawler) scanNode(n *html.Node, wg *sync.WaitGroup) {
 		for _, a := range n.Attr {
 			if a.Key == "href" {
 				if u, err := url.Parse(a.Val); err == nil {
-					c.urlsChan <- *u
+					select {
+					case c.urlsChan <- *u:
+					case <-(*c.ctx).Done():
+						return
+					}
 				}
 				break
 			}
