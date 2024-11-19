@@ -2,6 +2,7 @@
 package crawler
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,7 @@ type Crawler struct {
 	urlsChan     chan url.URL
 	channels     Channels
 	scanParent   bool
+	ctx          *context.Context
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -34,7 +36,7 @@ type Page struct {
 type Channels map[int]chan Page
 
 // NewCrawler is the crawler inicialization method
-func NewCrawler(urlString string, chans Channels, parents bool) (*Crawler, error) {
+func NewCrawler(urlString string, chans Channels, parents bool, ctx *context.Context) (*Crawler, error) {
 	urlObject, err := url.Parse(urlString)
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse root url")
@@ -54,6 +56,7 @@ func NewCrawler(urlString string, chans Channels, parents bool) (*Crawler, error
 		client:       client,
 		scannedItems: map[string]bool{},
 		scanParent:   parents,
+		ctx:          ctx,
 	}
 	crawler.urlsChan = make(chan url.URL)
 	return crawler, nil
@@ -68,20 +71,28 @@ func (c *Crawler) Run() {
 		c.scannedItems[u.String()] = true
 		var ur url.URL
 		for {
-			ur = <-c.urlsChan
-			ur, err := c.repairUrl(&ur)
-			if err != nil {
-				continue
+			select {
+			case ur = <-c.urlsChan:
+				ur, err := c.repairUrl(&ur)
+				if err != nil {
+					continue
+				}
+				if u.Host != c.root.Host {
+					continue
+				}
+				if c.containsString(ur.String()) {
+					continue
+				}
+				c.scannedItems[ur.String()] = true
+				wg.Add(1)
+				go c.scanUrl(&ur, &wg)
+			case <-(*c.ctx).Done():
+				close(c.urlsChan)
+				for _, channel := range c.channels {
+					close(channel)
+				}
+				return
 			}
-			if u.Host != c.root.Host {
-				continue
-			}
-			if c.containsString(ur.String()) {
-				continue
-			}
-			c.scannedItems[ur.String()] = true
-			wg.Add(1)
-			go c.scanUrl(&ur, &wg)
 		}
 	}(c.root)
 	wg.Wait()
