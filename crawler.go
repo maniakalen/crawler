@@ -23,6 +23,7 @@ type Crawler struct {
 	channels     Channels
 	scanParent   bool
 	ctx          *context.Context
+	mux          sync.Mutex
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -83,7 +84,9 @@ func (c *Crawler) Run() {
 				if c.containsString(ur.String()) {
 					continue
 				}
+				c.mux.Lock()
 				c.scannedItems[ur.String()] = true
+				c.mux.Unlock()
 				wg.Add(1)
 				go c.scanUrl(&ur, &wg)
 			case <-(*c.ctx).Done():
@@ -182,6 +185,8 @@ func (c *Crawler) repairUrl(u *url.URL) (url.URL, error) {
 }
 
 func (c *Crawler) containsString(item string) bool {
+	c.mux.Lock()
 	_, contain := c.scannedItems[item]
+	c.mux.Unlock()
 	return contain
 }
