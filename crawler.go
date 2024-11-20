@@ -96,10 +96,6 @@ func (c *Crawler) Run() {
 	}(c.root)
 	wg.Wait()
 	close(c.urlsChan)
-	for idx, channel := range c.channels {
-		close(channel)
-		delete(c.channels, idx)
-	}
 }
 
 func (c *Crawler) scanUrl(u *url.URL, wg *sync.WaitGroup) error {
