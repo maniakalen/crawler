@@ -14,7 +14,7 @@ import (
 
 	log "github.com/maniakalen/crawler/log"
 
-	"github.com/maniakalen/crawler/queue"
+	"github.com/maniakalen/queue"
 	"golang.org/x/net/html"
 )
 
@@ -127,6 +127,8 @@ func (c *Crawler) Run() {
 			if i < n {
 				i++
 				go worker(&i, c)
+			} else {
+				time.Sleep(5 * time.Second)
 			}
 		}
 	}()
