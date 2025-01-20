@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -40,7 +41,7 @@ type Page struct {
 // Channels is a Page channels map where the index is the response code so we can define different behavior for the different resp codes
 type Channels map[int]chan Page
 
-var n int = 8 // Number of workers
+var n int = runtime.GOMAXPROCS(0) // Number of workers
 
 func worker(i *int, c *Crawler) {
 	log.Info("Worker ", i, " started")
