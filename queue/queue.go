@@ -65,6 +65,7 @@ func New(parentCtx context.Context) *Queue {
 		}
 	}()
 	go func() {
+		defer cancel()
 		for {
 			select {
 			case <-(*queue.ctx).Done():
