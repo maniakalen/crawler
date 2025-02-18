@@ -42,39 +42,41 @@ type Page struct {
 type Channels map[int]chan Page
 
 var n int = runtime.GOMAXPROCS(0) // Number of workers
-
+var cr int = 0                    // Number of workers
 func worker(i *int, c *Crawler) {
-	log.Info("Worker ", i, " started")
-	defer log.Info("Worker ", i, " stopped")
+	cr++
+	cr := cr
+	log.Info("Worker ", cr, " started")
+	defer log.Info("Worker ", cr, " stopped")
 	defer c.Close()
 	defer func() {
 		*i--
 	}()
 	for {
-		log.Debug("Worker ", i, " is waiting for a url. Queue with size: ", c.queue.Size())
+		log.Debug("Worker ", cr, " is waiting for a url. Queue with size: ", c.queue.Size())
 		select {
 		case urlInterface := <-(c.queue.Out):
 			if urlInterface == nil {
 				continue
 			}
 			url := urlInterface.(url.URL)
-			log.Debug("Worker ", i, " received url: ", url.String())
+			log.Debug("Worker ", cr, " received url: ", url.String())
 			if url.Host == c.root.Host && !c.containsString(url.String()) {
 				c.scannedItems.Store(url.String(), true)
-				log.Debug("Worker ", i, " is scanning url: ", url.String())
+				log.Debug("Worker ", cr, " is scanning url: ", url.String())
 				err := c.scanUrl(&url)
 				if err != nil {
 					log.Error("Error scanning url: " + err.Error())
 				}
-				log.Debug("Worker ", i, " finished scanning url: ", url.String())
+				log.Debug("Worker ", cr, " finished scanning url: ", url.String())
 			}
 		case <-time.After(5 * time.Second):
 			if c.queue.Size() == 0 {
-				log.Debug("Worker ", i, " is closing due to inactivity")
+				log.Debug("Worker ", cr, " is closing due to inactivity")
 				return
 			}
 		case <-(*c.ctx).Done():
-			log.Debug("Worker ", i, " is closing due to context")
+			log.Debug("Worker ", cr, " is closing due to context")
 			return
 		}
 		time.Sleep(500 * time.Microsecond)
@@ -123,12 +125,19 @@ func (c *Crawler) Close() {
 func (c *Crawler) Run() {
 	go func() {
 		i := 0
-		for c.queue.Size() >= 0 {
-			if i < n {
-				i++
-				go worker(&i, c)
-			} else {
-				time.Sleep(5 * time.Second)
+		for {
+			select {
+			case <-(*c.ctx).Done():
+				log.Debug("Crawler is closing")
+				return
+			default:
+				if c.queue.Size() > 0 && i < n {
+					i++
+					go worker(&i, c)
+				} else {
+					log.Debug("Crawler is waiting for workers to finish")
+					time.Sleep(5 * time.Second)
+				}
 			}
 		}
 	}()
