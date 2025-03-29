@@ -29,6 +29,7 @@ type Crawler struct {
 	filters      []func(p Page) bool
 	ctx          *context.Context
 	cancel       *context.CancelFunc
+	headers      map[string]string
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -42,39 +43,41 @@ type Page struct {
 type Channels map[int]chan Page
 
 var n int = runtime.GOMAXPROCS(0) // Number of workers
-
+var cr int = 0                    // Number of workers
 func worker(i *int, c *Crawler) {
-	log.Info("Worker ", i, " started")
-	defer log.Info("Worker ", i, " stopped")
+	cr++
+	cr := cr
+	log.Info("Worker ", cr, " started")
+	defer log.Info("Worker ", cr, " stopped")
 	defer c.Close()
 	defer func() {
 		*i--
 	}()
 	for {
-		log.Debug("Worker ", i, " is waiting for a url. Queue with size: ", c.queue.Size())
+		log.Debug("Worker ", cr, " is waiting for a url. Queue with size: ", c.queue.Size())
 		select {
 		case urlInterface := <-(c.queue.Out):
 			if urlInterface == nil {
 				continue
 			}
 			url := urlInterface.(url.URL)
-			log.Debug("Worker ", i, " received url: ", url.String())
+			log.Debug("Worker ", cr, " received url: ", url.String())
 			if url.Host == c.root.Host && !c.containsString(url.String()) {
 				c.scannedItems.Store(url.String(), true)
-				log.Debug("Worker ", i, " is scanning url: ", url.String())
+				log.Debug("Worker ", cr, " is scanning url: ", url.String())
 				err := c.scanUrl(&url)
 				if err != nil {
 					log.Error("Error scanning url: " + err.Error())
 				}
-				log.Debug("Worker ", i, " finished scanning url: ", url.String())
+				log.Debug("Worker ", cr, " finished scanning url: ", url.String())
 			}
 		case <-time.After(5 * time.Second):
 			if c.queue.Size() == 0 {
-				log.Debug("Worker ", i, " is closing due to inactivity")
+				log.Debug("Worker ", cr, " is closing due to inactivity")
 				return
 			}
 		case <-(*c.ctx).Done():
-			log.Debug("Worker ", i, " is closing due to context")
+			log.Debug("Worker ", cr, " is closing due to context")
 			return
 		}
 		time.Sleep(500 * time.Microsecond)
@@ -82,7 +85,7 @@ func worker(i *int, c *Crawler) {
 }
 
 // New is the crawler inicialization method
-func New(urlString string, chans Channels, parents bool, filters []func(p Page) bool, parentCtx context.Context) (*Crawler, error) {
+func New(parentCtx context.Context, urlString string, chans Channels, parents bool, filters []func(p Page) bool, headers map[string]string) (*Crawler, error) {
 	urlObject, err := url.Parse(urlString)
 	if err != nil {
 		log.Error("unable to parse root url: " + err.Error())
@@ -105,6 +108,7 @@ func New(urlString string, chans Channels, parents bool, filters []func(p Page) 
 		filters:      filters,
 		ctx:          &ctx,
 		cancel:       &cancel,
+		headers:      headers,
 	}
 
 	return crawler, nil
@@ -123,12 +127,19 @@ func (c *Crawler) Close() {
 func (c *Crawler) Run() {
 	go func() {
 		i := 0
-		for c.queue.Size() >= 0 {
-			if i < n {
-				i++
-				go worker(&i, c)
-			} else {
-				time.Sleep(5 * time.Second)
+		for {
+			select {
+			case <-(*c.ctx).Done():
+				log.Debug("Crawler is closing")
+				return
+			default:
+				if c.queue.Size() > 0 && i < n {
+					i++
+					go worker(&i, c)
+				} else {
+					log.Debug("Crawler is waiting for workers to finish")
+					time.Sleep(5 * time.Second)
+				}
 			}
 		}
 	}()
@@ -143,7 +154,9 @@ func (c *Crawler) scanUrl(u *url.URL) error {
 			log.Error("unable to create request: " + err.Error())
 			return fmt.Errorf("unable to create request %+v", err)
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3")
+		for key, value := range c.headers {
+			req.Header.Set(key, value)
+		}
 		resp, err := c.client.Do(req)
 		if err != nil {
 			return fmt.Errorf("unable to fetch url %+v", err)
