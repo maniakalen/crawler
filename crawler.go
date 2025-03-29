@@ -120,6 +120,10 @@ func (c *Crawler) Done() <-chan struct{} {
 
 func (c *Crawler) Close() {
 	c.queue.Close()
+	log.Debug("Closing channels")
+	for _, channel := range c.channels {
+		close(channel)
+	}
 	(*c.cancel)()
 }
 
@@ -136,6 +140,9 @@ func (c *Crawler) Run() {
 				if c.queue.Size() > 0 && i < n {
 					i++
 					go worker(&i, c)
+				} else if c.queue.Size() == 0 && i == 0 {
+					log.Debug("Crawler is done. closing channels")
+					c.Close()
 				} else {
 					log.Debug("Crawler is waiting for workers to finish")
 					time.Sleep(5 * time.Second)
