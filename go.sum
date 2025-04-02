@@ -2,7 +2,11 @@ github.com/maniakalen/queue v1.0.1 h1:EcgYcGfQfEwc9UUT8QIZJ68kFKbj29Yr2D7M00HXV8
 github.com/maniakalen/queue v1.0.1/go.mod h1:GT8KU7PEv/rgXnDmdo/NV9ggFUTd+nyEUlX7n0zpwdw=
 github.com/maniakalen/queue v1.0.2 h1:ZmNJyP5PXfbRQEA7zRBV3rWEHDiO14uTFz00WjnaMyE=
 github.com/maniakalen/queue v1.0.2/go.mod h1:GT8KU7PEv/rgXnDmdo/NV9ggFUTd+nyEUlX7n0zpwdw=
+github.com/maniakalen/queue v1.0.3 h1:1ndl0FAhoOj7PXHX5IcIsNGGhVf9tZL2fPTF4KxgREc=
+github.com/maniakalen/queue v1.0.3/go.mod h1:GT8KU7PEv/rgXnDmdo/NV9ggFUTd+nyEUlX7n0zpwdw=
 golang.org/x/net v0.30.0 h1:AcW1SDZMkb8IpzCdQUaIq2sP4sZ4zw+55h6ynffypl4=
 golang.org/x/net v0.30.0/go.mod h1:2wGyMJ5iFasEhkwi13ChkO/t1ECNC4X4eBKkVFyYFlU=
 golang.org/x/net v0.34.0 h1:Mb7Mrk043xzHgnRM88suvJFwzVrRfHEHJEl5/71CKw0=
 golang.org/x/net v0.34.0/go.mod h1:di0qlW3YNM5oh6GqDGQr92MyTozJPmybPK4Ev/Gm31k=
+golang.org/x/net v0.38.0 h1:vRMAPTMaeGqVhG5QyLJHqNDwecKTomGeqbnfZyKlBI8=
+golang.org/x/net v0.38.0/go.mod h1:ivrbrMbzFq5J41QOQh0siUuly180yBYtLp+CKbEaFx8=
