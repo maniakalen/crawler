@@ -271,7 +271,7 @@ func (c *Crawler) scanNode(n *html.Node) {
 		for _, a := range n.Attr {
 			if a.Key == "href" {
 				log.Debug("Found href: ", a.Val)
-				if u, err := url.Parse(a.Val); err == nil {
+				if u, err := url.Parse(strings.Trim(a.Val, " ")); err == nil {
 					log.Debug("Parsed url: ", u.String())
 					u, err := c.repairUrl(u)
 					log.Debug("Repaired url: ", u.String())
