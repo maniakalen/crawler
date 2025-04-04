@@ -66,8 +66,7 @@ func worker(i *int, c *Crawler) {
 			}
 			url := urlInterface.(url.URL)
 			log.Debug("Worker ", cr, " received url: ", url.String())
-			if url.Host == c.root.Host && !c.containsString(url.String()) {
-				c.StoreScannedItem(url.String())
+			if url.Host == c.root.Host {
 				log.Debug("Worker ", cr, " is scanning url: ", url.String())
 				err := c.scanUrl(&url)
 				if err != nil {
@@ -139,7 +138,7 @@ func (c *Crawler) Done() <-chan struct{} {
 }
 
 func (c *Crawler) Close() {
-	fmt.Println("Closing")
+	log.Info("Closing")
 	c.queue.Close()
 	(*c.cancel)()
 	if c.useScannedItemsStorage {
@@ -184,8 +183,8 @@ func (c *Crawler) LoadScannedItemsStore() {
 func (c *Crawler) Run() {
 	c.queue.In <- *c.root
 	time.Sleep(500 * time.Millisecond)
-	fmt.Printf("Queue size: %d\n", c.queue.Size())
-	fmt.Printf("Scanned items: %d\n", c.ScannedItemsCount())
+	log.Info(fmt.Sprintf("Queue size: %d\n", c.queue.Size()))
+	log.Info(fmt.Sprintf("Scanned items: %d\n", c.ScannedItemsCount()))
 	go func() {
 		i := 0
 		reps := 0
@@ -216,6 +215,7 @@ func (c *Crawler) Run() {
 
 func (c *Crawler) scanUrl(u *url.URL) error {
 	if u.String() != "" && !strings.Contains(u.String(), "javascript:") {
+		c.StoreScannedItem(u.String())
 		log.Debug("Requesting url: ", u.String())
 		req, err := http.NewRequest("GET", u.String(), nil)
 		if err != nil {
