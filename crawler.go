@@ -35,6 +35,7 @@ type Crawler struct {
 	cancel                 *context.CancelFunc
 	headers                map[string]string
 	useScannedItemsStorage bool
+	scannedItemsStorageDir string
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -66,7 +67,7 @@ func worker(i *int, c *Crawler) {
 			}
 			url := urlInterface.(url.URL)
 			log.Debug("Worker ", cr, " received url: ", url.String())
-			if url.Host == c.root.Host {
+			if url.Host == c.root.Host && !c.containsString(url.String()) {
 				log.Debug("Worker ", cr, " is scanning url: ", url.String())
 				err := c.scanUrl(&url)
 				if err != nil {
@@ -88,7 +89,7 @@ func worker(i *int, c *Crawler) {
 }
 
 // New is the crawler inicialization method
-func New(parentCtx context.Context, urlString string, chans Channels, parents bool, filters []func(p Page) bool, headers map[string]string) (*Crawler, error) {
+func New(parentCtx context.Context, urlString string, chans Channels, parents bool, filters []func(p Page) bool, headers map[string]string, dir string) (*Crawler, error) {
 	urlObject, err := url.Parse(urlString)
 	if err != nil {
 		log.Error("unable to parse root url: " + err.Error())
@@ -99,6 +100,10 @@ func New(parentCtx context.Context, urlString string, chans Channels, parents bo
 	}
 	if urlObject.Path == "" {
 		urlObject.Path = "/"
+	}
+	err = os.MkdirAll(dir, 0755)
+	if err != nil {
+		log.Fatal("Unable to create directory")
 	}
 	ctx, cancel := context.WithCancel(parentCtx)
 	crawler := &Crawler{
@@ -114,6 +119,7 @@ func New(parentCtx context.Context, urlString string, chans Channels, parents bo
 		cancel:                 &cancel,
 		headers:                headers,
 		useScannedItemsStorage: false,
+		scannedItemsStorageDir: dir,
 	}
 	return crawler, nil
 }
@@ -125,8 +131,10 @@ func (c *Crawler) SetScannedItems(items []string) {
 }
 
 func (c *Crawler) StoreScannedItem(item string) {
-	c.scannedItems.Store(item, true)
-	c.scannedItemsCount++
+	if item != c.root.String() {
+		c.scannedItems.Store(item, true)
+		c.scannedItemsCount++
+	}
 }
 
 func (c *Crawler) ScannedItemsCount() int64 {
@@ -139,10 +147,10 @@ func (c *Crawler) Done() <-chan struct{} {
 
 func (c *Crawler) Close() {
 	log.Info("Closing")
-	c.queue.Close()
+	defer c.queue.Close()
 	(*c.cancel)()
 	if c.useScannedItemsStorage {
-		fname := fmt.Sprintf("%x", md5.Sum([]byte(c.root.String())))
+		fname := fmt.Sprintf("%s/%x", c.scannedItemsStorageDir, md5.Sum([]byte(c.root.String())))
 		f, err := os.Create(fname)
 		if err != nil {
 			log.Warn("Failed to open file")
@@ -164,7 +172,7 @@ func (c *Crawler) SetUseScannedItemsStorage(val bool) {
 
 func (c *Crawler) LoadScannedItemsStore() {
 	if c.useScannedItemsStorage {
-		fname := fmt.Sprintf("%x", md5.Sum([]byte(c.root.String())))
+		fname := fmt.Sprintf("%s/%x", c.scannedItemsStorageDir, md5.Sum([]byte(c.root.String())))
 		file, err := os.Open(fname)
 		if err != nil {
 			log.Warn("Failed to load scanned items")
