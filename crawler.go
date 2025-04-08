@@ -2,9 +2,7 @@
 package crawler
 
 import (
-	"bufio"
 	"context"
-	"crypto/md5"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,10 +10,10 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	log "github.com/maniakalen/crawler/log"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/maniakalen/queue"
 	"golang.org/x/net/html"
@@ -25,8 +23,6 @@ import (
 type Crawler struct {
 	root                   *url.URL
 	client                 *http.Client
-	scannedItems           sync.Map
-	scannedItemsCount      int64
 	queue                  *queue.Queue
 	channels               Channels
 	scanParent             bool
@@ -34,9 +30,9 @@ type Crawler struct {
 	ctx                    *context.Context
 	cancel                 *context.CancelFunc
 	headers                map[string]string
-	useScannedItemsStorage bool
 	scannedItemsStorageDir string
 	loadControl            chan bool
+	rdb                    *redis.Client
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -107,21 +103,28 @@ func New(parentCtx context.Context, urlString string, chans Channels, parents bo
 		log.Fatal("Unable to create directory")
 	}
 	ctx, cancel := context.WithCancel(parentCtx)
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+	})
+	res, err := rdb.Ping(ctx).Result()
+	if res != "PONG" {
+		os.Exit(1)
+	}
 	crawler := &Crawler{
 		root:                   urlObject,
 		channels:               chans,
 		client:                 client,
 		queue:                  queue.New(ctx),
-		scannedItems:           sync.Map{},
-		scannedItemsCount:      0,
 		scanParent:             parents,
 		filters:                filters,
 		ctx:                    &ctx,
 		cancel:                 &cancel,
 		headers:                headers,
-		useScannedItemsStorage: false,
 		scannedItemsStorageDir: dir,
 		loadControl:            make(chan bool, cscans),
+		rdb:                    rdb,
 	}
 	return crawler, nil
 }
@@ -134,13 +137,18 @@ func (c *Crawler) SetScannedItems(items []string) {
 
 func (c *Crawler) StoreScannedItem(item string) {
 	if item != c.root.String() {
-		c.scannedItems.Store(item, true)
-		c.scannedItemsCount++
+		key := c.getRedisKey()
+		c.rdb.RPush(*c.ctx, key, item)
 	}
 }
 
 func (c *Crawler) ScannedItemsCount() int64 {
-	return c.scannedItemsCount
+	key := c.getRedisKey()
+	res, err := c.rdb.LLen(*c.ctx, key).Result()
+	if err != nil {
+		log.Error("Unable to get list length")
+	}
+	return res
 }
 
 func (c *Crawler) Done() <-chan struct{} {
@@ -151,42 +159,7 @@ func (c *Crawler) Close() {
 	log.Info("Closing")
 	defer c.queue.Close()
 	(*c.cancel)()
-	if c.useScannedItemsStorage {
-		fname := fmt.Sprintf("%s/%x", c.scannedItemsStorageDir, md5.Sum([]byte(c.root.String())))
-		f, err := os.Create(fname)
-		if err != nil {
-			log.Warn("Failed to open file")
-		} else {
-			defer f.Close()
-			c.scannedItems.Range(func(key, value interface{}) bool {
-				f.WriteString(key.(string) + "\n")
-				return true
-			})
-			f.Sync()
-		}
-	}
-}
-
-func (c *Crawler) SetUseScannedItemsStorage(val bool) {
-	c.useScannedItemsStorage = val
-	c.LoadScannedItemsStore()
-}
-
-func (c *Crawler) LoadScannedItemsStore() {
-	if c.useScannedItemsStorage {
-		fname := fmt.Sprintf("%s/%x", c.scannedItemsStorageDir, md5.Sum([]byte(c.root.String())))
-		file, err := os.Open(fname)
-		if err != nil {
-			log.Warn("Failed to load scanned items")
-		} else {
-			defer file.Close()
-			reader := bufio.NewScanner(file)
-			for reader.Scan() {
-				line := reader.Text()
-				c.StoreScannedItem(line)
-			}
-		}
-	}
+	c.rdb.Close()
 }
 
 // Run is the crawler start method
@@ -335,6 +308,11 @@ func (c *Crawler) repairUrl(u *url.URL) (url.URL, error) {
 }
 
 func (c *Crawler) containsString(item string) bool {
-	_, contain := c.scannedItems.Load(item)
-	return contain
+	key := c.getRedisKey()
+	_, err := c.rdb.LPos(*c.ctx, key, item, redis.LPosArgs{}).Result()
+	return err == nil
+}
+
+func (c *Crawler) getRedisKey() string {
+	return fmt.Sprintf("checked:%s", c.root.Hostname())
 }
