@@ -302,15 +302,18 @@ func (c *Crawler) addToQueue(item string) {
 	key := c.getQueueRedisKey()
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
-	c.rdb.RPush(*c.ctx, key, item)
+	c.rdb.ZAdd(*c.ctx, key, redis.Z{Member: item, Score: 1})
 }
 
-func (c *Crawler) fetchFromQueue() (string, error) {
+func (c *Crawler) fetchFromQueue() string {
 	key := c.getQueueRedisKey()
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
-	res, err := c.rdb.LPop(*c.ctx, key).Result()
-	return res, err
+	res, err := c.rdb.ZPopMax(*c.ctx, key, 1).Result()
+	if err != nil {
+		log.Error(err)
+	}
+	return res[0].Member.(string)
 }
 
 func (c *Crawler) containsString(item string) bool {
@@ -331,7 +334,7 @@ func (c *Crawler) getQueueSize() int64 {
 	key := c.getQueueRedisKey()
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
-	res, err := c.rdb.LLen(*c.ctx, key).Result()
+	res, err := c.rdb.ZCard(*c.ctx, key).Result()
 	if err != nil {
 		log.Error("Unable to get list length")
 	}
