@@ -10,12 +10,12 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/maniakalen/crawler/log"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/maniakalen/queue"
 	"golang.org/x/net/html"
 )
 
@@ -23,7 +23,6 @@ import (
 type Crawler struct {
 	root        *url.URL
 	client      *http.Client
-	queue       *queue.Queue
 	channels    Channels
 	scanParent  bool
 	filters     []func(p Page) bool
@@ -33,6 +32,7 @@ type Crawler struct {
 	loadControl chan bool
 	rdb         *redis.Client
 	usrCfg      int
+	queueLock   sync.Mutex
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -56,30 +56,27 @@ func worker(i *int, c *Crawler) {
 		*i--
 	}()
 	for {
-		log.Debug("Worker ", cr, " is waiting for a url. Queue with size: ", c.queue.Size())
 		select {
-		case urlInterface := <-(c.queue.Out):
-			if urlInterface == nil {
-				continue
-			}
-			url := urlInterface.(url.URL)
-			log.Debug("Worker ", cr, " received url: ", url.String())
-			if url.Host == c.root.Host && !c.containsString(url.String()) {
-				log.Debug("Worker ", cr, " is scanning url: ", url.String())
-				err := c.scanUrl(&url)
-				if err != nil {
-					log.Error("Error scanning url: " + err.Error())
-				}
-				log.Debug("Worker ", cr, " finished scanning url: ", url.String())
-			}
-		case <-time.After(5 * time.Second):
-			if c.queue.Size() == 0 {
-				log.Debug("Worker ", cr, " is closing due to inactivity")
-				return
-			}
 		case <-(*c.ctx).Done():
 			log.Debug("Worker ", cr, " is closing due to context")
 			return
+		default:
+		}
+		ustring, err := c.fetchFromQueue()
+		if err != nil {
+			break
+		}
+		url, err := url.Parse(ustring)
+		if err != nil {
+			log.Error("Unable to parse url")
+		}
+		if url.Host == c.root.Host && !c.containsString(url.String()) {
+			log.Debug("Worker ", cr, " is scanning url: ", url.String())
+			err := c.scanUrl(url)
+			if err != nil {
+				log.Error("Error scanning url: " + err.Error())
+			}
+			log.Debug("Worker ", cr, " finished scanning url: ", url.String())
 		}
 		time.Sleep(500 * time.Microsecond)
 	}
@@ -112,7 +109,6 @@ func New(parentCtx context.Context, urlString string, chans Channels, parents bo
 		root:        urlObject,
 		channels:    chans,
 		client:      client,
-		queue:       queue.New(ctx),
 		scanParent:  parents,
 		filters:     filters,
 		ctx:         &ctx,
@@ -153,16 +149,15 @@ func (c *Crawler) Done() <-chan struct{} {
 
 func (c *Crawler) Close() {
 	log.Info("Closing")
-	defer c.queue.Close()
 	(*c.cancel)()
 	c.rdb.Close()
 }
 
 // Run is the crawler start method
 func (c *Crawler) Run() {
-	c.queue.In <- *c.root
+	c.addToQueue((*c.root).String())
 	time.Sleep(500 * time.Millisecond)
-	log.Info(fmt.Sprintf("Queue size: %d\n", c.queue.Size()))
+	log.Info(fmt.Sprintf("Queue size: %d\n", c.getQueueSize()))
 	log.Info(fmt.Sprintf("Scanned items: %d\n", c.ScannedItemsCount()))
 	go func() {
 		i := 0
@@ -173,10 +168,10 @@ func (c *Crawler) Run() {
 				log.Debug("Crawler is closing")
 				return
 			default:
-				if c.queue.Size() > 0 && i < n {
+				if c.getQueueSize() > 0 && i < n {
 					i++
 					go worker(&i, c)
-				} else if c.queue.Size() == 0 && i == 0 {
+				} else if c.getQueueSize() == 0 && i == 0 {
 					log.Debug("Crawler is done. closing")
 					time.Sleep(5 * time.Second)
 					reps++
@@ -263,7 +258,7 @@ func (c *Crawler) scanNode(n *html.Node) {
 					log.Debug(fmt.Sprintf("Contains url: %+v", c.containsString(u.String())))
 					if err == nil && u.String() != "" && !strings.Contains(u.String(), "javascript:") && !c.containsString(u.String()) {
 						log.Debug("Adding url to queue channel: ", u.String())
-						c.queue.In <- u
+						c.addToQueue(u.String())
 					}
 				} else {
 					log.Error("unable to parse url: " + err.Error())
@@ -303,6 +298,21 @@ func (c *Crawler) repairUrl(u *url.URL) (url.URL, error) {
 
 }
 
+func (c *Crawler) addToQueue(item string) {
+	key := c.getQueueRedisKey()
+	c.queueLock.Lock()
+	defer c.queueLock.Unlock()
+	c.rdb.RPush(*c.ctx, key, item)
+}
+
+func (c *Crawler) fetchFromQueue() (string, error) {
+	key := c.getQueueRedisKey()
+	c.queueLock.Lock()
+	defer c.queueLock.Unlock()
+	res, err := c.rdb.LPop(*c.ctx, key).Result()
+	return res, err
+}
+
 func (c *Crawler) containsString(item string) bool {
 	key := c.getRedisKey()
 	_, err := c.rdb.LPos(*c.ctx, key, item, redis.LPosArgs{}).Result()
@@ -311,4 +321,19 @@ func (c *Crawler) containsString(item string) bool {
 
 func (c *Crawler) getRedisKey() string {
 	return fmt.Sprintf("checked:%d:%s", c.usrCfg, c.root.Hostname())
+}
+
+func (c *Crawler) getQueueRedisKey() string {
+	return fmt.Sprintf("queue:%d:%s", c.usrCfg, c.root.Hostname())
+}
+
+func (c *Crawler) getQueueSize() int64 {
+	key := c.getQueueRedisKey()
+	c.queueLock.Lock()
+	defer c.queueLock.Unlock()
+	res, err := c.rdb.LLen(*c.ctx, key).Result()
+	if err != nil {
+		log.Error("Unable to get list length")
+	}
+	return res
 }
