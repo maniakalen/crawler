@@ -36,6 +36,7 @@ type Crawler struct {
 	headers                map[string]string
 	useScannedItemsStorage bool
 	scannedItemsStorageDir string
+	loadControl            chan bool
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -120,6 +121,7 @@ func New(parentCtx context.Context, urlString string, chans Channels, parents bo
 		headers:                headers,
 		useScannedItemsStorage: false,
 		scannedItemsStorageDir: dir,
+		loadControl:            make(chan bool, 20),
 	}
 	return crawler, nil
 }
@@ -223,6 +225,10 @@ func (c *Crawler) Run() {
 
 func (c *Crawler) scanUrl(u *url.URL) error {
 	if u.String() != "" && !strings.Contains(u.String(), "javascript:") {
+		c.loadControl <- true
+		defer func() {
+			<-c.loadControl
+		}()
 		c.StoreScannedItem(u.String())
 		log.Debug("Requesting url: ", u.String())
 		req, err := http.NewRequest("GET", u.String(), nil)
