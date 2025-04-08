@@ -90,7 +90,7 @@ func worker(i *int, c *Crawler) {
 }
 
 // New is the crawler inicialization method
-func New(parentCtx context.Context, urlString string, chans Channels, parents bool, filters []func(p Page) bool, headers map[string]string, dir string) (*Crawler, error) {
+func New(parentCtx context.Context, urlString string, chans Channels, parents bool, filters []func(p Page) bool, headers map[string]string, dir string, cscans int) (*Crawler, error) {
 	urlObject, err := url.Parse(urlString)
 	if err != nil {
 		log.Error("unable to parse root url: " + err.Error())
@@ -121,7 +121,7 @@ func New(parentCtx context.Context, urlString string, chans Channels, parents bo
 		headers:                headers,
 		useScannedItemsStorage: false,
 		scannedItemsStorageDir: dir,
-		loadControl:            make(chan bool, 20),
+		loadControl:            make(chan bool, cscans),
 	}
 	return crawler, nil
 }
