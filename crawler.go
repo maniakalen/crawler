@@ -55,6 +55,7 @@ func worker(i *int, c *Crawler) {
 	defer func() {
 		*i--
 	}()
+	empty := 0
 	for {
 		select {
 		case <-(*c.ctx).Done():
@@ -62,9 +63,14 @@ func worker(i *int, c *Crawler) {
 			return
 		default:
 		}
-		ustring, err := c.fetchFromQueue()
-		if err != nil {
-			break
+		ustring := c.fetchFromQueue()
+		if len(ustring) == 0 {
+			if empty >= 10 {
+				return
+			}
+			empty++
+			time.Sleep(10 * time.Second)
+			continue
 		}
 		url, err := url.Parse(ustring)
 		if err != nil {
@@ -156,7 +162,7 @@ func (c *Crawler) Close() {
 // Run is the crawler start method
 func (c *Crawler) Run() {
 	c.addToQueue((*c.root).String())
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(1 * time.Second)
 	log.Info(fmt.Sprintf("Queue size: %d\n", c.getQueueSize()))
 	log.Info(fmt.Sprintf("Scanned items: %d\n", c.ScannedItemsCount()))
 	go func() {
@@ -302,16 +308,19 @@ func (c *Crawler) addToQueue(item string) {
 	key := c.getQueueRedisKey()
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
-	c.rdb.ZAdd(*c.ctx, key, redis.Z{Member: item, Score: 1})
+	c.rdb.ZAdd(*c.ctx, key, redis.Z{Member: item, Score: 1}).Result()
 }
 
 func (c *Crawler) fetchFromQueue() string {
 	key := c.getQueueRedisKey()
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
-	res, err := c.rdb.ZPopMax(*c.ctx, key, 1).Result()
+	res, err := c.rdb.ZPopMin(*c.ctx, key).Result()
 	if err != nil {
 		log.Error(err)
+	}
+	if len(res) == 0 {
+		return ""
 	}
 	return res[0].Member.(string)
 }
