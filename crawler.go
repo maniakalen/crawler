@@ -21,18 +21,17 @@ import (
 
 // Crawler is the main package object used to initialize the crawl
 type Crawler struct {
-	root                   *url.URL
-	client                 *http.Client
-	queue                  *queue.Queue
-	channels               Channels
-	scanParent             bool
-	filters                []func(p Page) bool
-	ctx                    *context.Context
-	cancel                 *context.CancelFunc
-	headers                map[string]string
-	scannedItemsStorageDir string
-	loadControl            chan bool
-	rdb                    *redis.Client
+	root        *url.URL
+	client      *http.Client
+	queue       *queue.Queue
+	channels    Channels
+	scanParent  bool
+	filters     []func(p Page) bool
+	ctx         *context.Context
+	cancel      *context.CancelFunc
+	headers     map[string]string
+	loadControl chan bool
+	rdb         *redis.Client
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -86,7 +85,7 @@ func worker(i *int, c *Crawler) {
 }
 
 // New is the crawler inicialization method
-func New(parentCtx context.Context, urlString string, chans Channels, parents bool, filters []func(p Page) bool, headers map[string]string, dir string, cscans int) (*Crawler, error) {
+func New(parentCtx context.Context, urlString string, chans Channels, parents bool, filters []func(p Page) bool, headers map[string]string, cscans int) (*Crawler, error) {
 	urlObject, err := url.Parse(urlString)
 	if err != nil {
 		log.Error("unable to parse root url: " + err.Error())
@@ -97,10 +96,6 @@ func New(parentCtx context.Context, urlString string, chans Channels, parents bo
 	}
 	if urlObject.Path == "" {
 		urlObject.Path = "/"
-	}
-	err = os.MkdirAll(dir, 0755)
-	if err != nil {
-		log.Fatal("Unable to create directory")
 	}
 	ctx, cancel := context.WithCancel(parentCtx)
 	rdb := redis.NewClient(&redis.Options{
@@ -113,18 +108,17 @@ func New(parentCtx context.Context, urlString string, chans Channels, parents bo
 		os.Exit(1)
 	}
 	crawler := &Crawler{
-		root:                   urlObject,
-		channels:               chans,
-		client:                 client,
-		queue:                  queue.New(ctx),
-		scanParent:             parents,
-		filters:                filters,
-		ctx:                    &ctx,
-		cancel:                 &cancel,
-		headers:                headers,
-		scannedItemsStorageDir: dir,
-		loadControl:            make(chan bool, cscans),
-		rdb:                    rdb,
+		root:        urlObject,
+		channels:    chans,
+		client:      client,
+		queue:       queue.New(ctx),
+		scanParent:  parents,
+		filters:     filters,
+		ctx:         &ctx,
+		cancel:      &cancel,
+		headers:     headers,
+		loadControl: make(chan bool, cscans),
+		rdb:         rdb,
 	}
 	return crawler, nil
 }
