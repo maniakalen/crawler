@@ -32,6 +32,7 @@ type Crawler struct {
 	headers     map[string]string
 	loadControl chan bool
 	rdb         *redis.Client
+	usrCfg      int
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -85,7 +86,7 @@ func worker(i *int, c *Crawler) {
 }
 
 // New is the crawler inicialization method
-func New(parentCtx context.Context, urlString string, chans Channels, parents bool, filters []func(p Page) bool, headers map[string]string, cscans int) (*Crawler, error) {
+func New(parentCtx context.Context, urlString string, chans Channels, parents bool, filters []func(p Page) bool, headers map[string]string, cscans int, cfg int) (*Crawler, error) {
 	urlObject, err := url.Parse(urlString)
 	if err != nil {
 		log.Error("unable to parse root url: " + err.Error())
@@ -119,6 +120,7 @@ func New(parentCtx context.Context, urlString string, chans Channels, parents bo
 		headers:     headers,
 		loadControl: make(chan bool, cscans),
 		rdb:         rdb,
+		usrCfg:      cfg,
 	}
 	return crawler, nil
 }
@@ -308,5 +310,5 @@ func (c *Crawler) containsString(item string) bool {
 }
 
 func (c *Crawler) getRedisKey() string {
-	return fmt.Sprintf("checked:%s", c.root.Hostname())
+	return fmt.Sprintf("checked:%d:%s", c.usrCfg, c.root.Hostname())
 }
