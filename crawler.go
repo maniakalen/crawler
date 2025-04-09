@@ -76,7 +76,7 @@ func worker(i *int, c *Crawler) {
 		if err != nil {
 			log.Error("Unable to parse url")
 		}
-		if url.Host == c.root.Host && !c.containsString(url.String()) {
+		if url.Host == c.root.Host {
 			log.Debug("Worker ", cr, " is scanning url: ", url.String())
 			err := c.scanUrl(url)
 			if err != nil {
@@ -127,17 +127,9 @@ func New(parentCtx context.Context, urlString string, chans Channels, parents bo
 	return crawler, nil
 }
 
-func (c *Crawler) SetScannedItems(items []string) {
-	for _, item := range items {
-		c.StoreScannedItem(item)
-	}
-}
-
 func (c *Crawler) StoreScannedItem(item string) {
-	if item != c.root.String() {
-		key := c.getRedisKey()
-		c.rdb.RPush(*c.ctx, key, item)
-	}
+	key := c.getRedisKey()
+	c.rdb.RPush(*c.ctx, key, item)
 }
 
 func (c *Crawler) ScannedItemsCount() int64 {
