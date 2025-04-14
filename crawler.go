@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +41,7 @@ type Config struct {
 	Channels     Channels
 	Id           int
 	Throttle     int
+	MaxWorkers   int
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -54,8 +54,8 @@ type Page struct {
 // Channels is a Page channels map where the index is the response code so we can define different behavior for the different resp codes
 type Channels map[int]chan Page
 
-var n int = runtime.GOMAXPROCS(0) // Number of workers
-var cr int = 0                    // Number of workers
+// Number of workers
+var cr int = 0 // Number of workers
 func worker(i *int, c *Crawler) {
 	cr++
 	cr := cr
@@ -165,7 +165,7 @@ func (c *Crawler) Run() {
 				log.Debug("Crawler is closing")
 				return
 			default:
-				if c.getQueueSize() > 0 && i < n {
+				if c.getQueueSize() > 0 && i < c.config.MaxWorkers {
 					i++
 					go worker(&i, c)
 				} else if c.getQueueSize() == 0 && i == 0 {
