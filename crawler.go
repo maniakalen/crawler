@@ -57,12 +57,15 @@ type Channels map[int]chan Page
 // Number of workers
 var cr int = 0 // Number of workers
 func worker(i *int, c *Crawler) {
+	redisWorkerKey := c.getRedisKey("workers")
 	cr++
 	cr := cr
 	log.Info("Worker ", cr, " started")
+	c.rdb.Incr(*c.ctx, redisWorkerKey)
 	defer log.Info("Worker ", cr, " stopped")
 	defer func() {
 		*i--
+		c.rdb.Decr(*c.ctx, redisWorkerKey)
 	}()
 	empty := 0
 	for {
@@ -127,12 +130,12 @@ func New(parentCtx context.Context, config *Config) (*Crawler, error) {
 }
 
 func (c *Crawler) StoreScannedItem(item string) {
-	key := c.getRedisKey()
+	key := c.getRedisKey("checked")
 	c.rdb.RPush(*c.ctx, key, item)
 }
 
 func (c *Crawler) ScannedItemsCount() int64 {
-	key := c.getRedisKey()
+	key := c.getRedisKey("checked")
 	res, err := c.rdb.LLen(*c.ctx, key).Result()
 	if err != nil {
 		log.Error("Unable to get list length")
@@ -156,6 +159,8 @@ func (c *Crawler) Run() {
 	time.Sleep(1 * time.Second)
 	log.Info(fmt.Sprintf("Queue size: %d\n", c.getQueueSize()))
 	log.Info(fmt.Sprintf("Scanned items: %d\n", c.ScannedItemsCount()))
+	redisWorkerKey := c.getRedisKey("workers")
+	c.rdb.Set(*c.ctx, redisWorkerKey, 0, 0)
 	go func() {
 		i := 0
 		reps := 0
@@ -165,9 +170,10 @@ func (c *Crawler) Run() {
 				log.Debug("Crawler is closing")
 				return
 			default:
-				if c.getQueueSize() > 0 && i < c.config.MaxWorkers {
+				if c.getQueueSize() > 0 && (c.config.MaxWorkers == 0 || i < c.config.MaxWorkers) {
 					i++
 					go worker(&i, c)
+					fmt.Printf("Executed worker for %s. %d more workers to run\n", c.config.Root.String(), c.config.MaxWorkers-i)
 				} else if c.getQueueSize() == 0 && i == 0 {
 					log.Debug("Crawler is done. closing")
 					time.Sleep(5 * time.Second)
@@ -298,14 +304,14 @@ func (c *Crawler) repairUrl(u *url.URL) (url.URL, error) {
 }
 
 func (c *Crawler) addToQueue(item string) {
-	key := c.getQueueRedisKey()
+	key := c.getRedisKey("queue")
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
 	c.rdb.ZAdd(*c.ctx, key, redis.Z{Member: item, Score: 1}).Result()
 }
 
 func (c *Crawler) fetchFromQueue() string {
-	key := c.getQueueRedisKey()
+	key := c.getRedisKey("queue")
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
 	res, err := c.rdb.ZPopMin(*c.ctx, key).Result()
@@ -319,21 +325,17 @@ func (c *Crawler) fetchFromQueue() string {
 }
 
 func (c *Crawler) containsString(item string) bool {
-	key := c.getRedisKey()
+	key := c.getRedisKey("checked")
 	_, err := c.rdb.LPos(*c.ctx, key, item, redis.LPosArgs{}).Result()
 	return err == nil
 }
 
-func (c *Crawler) getRedisKey() string {
-	return fmt.Sprintf("checked:%d:%s", c.config.Id, c.config.Root.Hostname())
-}
-
-func (c *Crawler) getQueueRedisKey() string {
-	return fmt.Sprintf("queue:%d:%s", c.config.Id, c.config.Root.Hostname())
+func (c *Crawler) getRedisKey(prefix string) string {
+	return fmt.Sprintf("%s:%d:%s", prefix, c.config.Id, c.config.Root.Hostname())
 }
 
 func (c *Crawler) getQueueSize() int64 {
-	key := c.getQueueRedisKey()
+	key := c.getRedisKey("queue")
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
 	res, err := c.rdb.ZCard(*c.ctx, key).Result()
