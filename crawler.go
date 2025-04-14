@@ -21,18 +21,27 @@ import (
 
 // Crawler is the main package object used to initialize the crawl
 type Crawler struct {
-	root        *url.URL
 	client      *http.Client
-	channels    Channels
-	scanParent  bool
-	filters     []func(p Page) bool
 	ctx         *context.Context
 	cancel      *context.CancelFunc
-	headers     map[string]string
-	loadControl chan bool
 	rdb         *redis.Client
-	usrCfg      int
 	queueLock   sync.Mutex
+	config      *Config
+	loadControl chan bool
+}
+
+type Config struct {
+	Root         *url.URL
+	RedisAddress string
+	RedisPort    int
+	RedisPass    string
+	RedisDb      int
+	Headers      map[string]string
+	ScanParents  bool
+	Filters      []func(p Page) bool
+	Channels     Channels
+	Id           int
+	Throttle     int
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -76,7 +85,7 @@ func worker(i *int, c *Crawler) {
 		if err != nil {
 			log.Error("Unable to parse url")
 		}
-		if url.Host == c.root.Host {
+		if url.Host == c.config.Root.Host {
 			log.Debug("Worker ", cr, " is scanning url: ", url.String())
 			err := c.scanUrl(url)
 			if err != nil {
@@ -89,40 +98,30 @@ func worker(i *int, c *Crawler) {
 }
 
 // New is the crawler inicialization method
-func New(parentCtx context.Context, urlString string, chans Channels, parents bool, filters []func(p Page) bool, headers map[string]string, cscans int, cfg int) (*Crawler, error) {
-	urlObject, err := url.Parse(urlString)
-	if err != nil {
-		log.Error("unable to parse root url: " + err.Error())
-		return nil, fmt.Errorf("unable to parse root url")
-	}
+func New(parentCtx context.Context, config *Config) (*Crawler, error) {
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
-	if urlObject.Path == "" {
-		urlObject.Path = "/"
-	}
+
 	ctx, cancel := context.WithCancel(parentCtx)
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
+		Addr:     fmt.Sprintf("%s:%d", config.RedisAddress, config.RedisPort),
+		Password: config.RedisPass, // no password set
+		DB:       config.RedisDb,   // use default DB
 	})
-	res, err := rdb.Ping(ctx).Result()
+	res, _ := rdb.Ping(ctx).Result()
 	if res != "PONG" {
 		os.Exit(1)
 	}
 	crawler := &Crawler{
-		root:        urlObject,
-		channels:    chans,
-		client:      client,
-		scanParent:  parents,
-		filters:     filters,
-		ctx:         &ctx,
-		cancel:      &cancel,
-		headers:     headers,
-		loadControl: make(chan bool, cscans),
-		rdb:         rdb,
-		usrCfg:      cfg,
+		client: client,
+		ctx:    &ctx,
+		cancel: &cancel,
+		rdb:    rdb,
+		config: config,
+	}
+	if config.Throttle != 0 {
+		crawler.loadControl = make(chan bool, config.Throttle)
 	}
 	return crawler, nil
 }
@@ -153,7 +152,7 @@ func (c *Crawler) Close() {
 
 // Run is the crawler start method
 func (c *Crawler) Run() {
-	c.addToQueue((*c.root).String())
+	c.addToQueue((*c.config.Root).String())
 	time.Sleep(1 * time.Second)
 	log.Info(fmt.Sprintf("Queue size: %d\n", c.getQueueSize()))
 	log.Info(fmt.Sprintf("Scanned items: %d\n", c.ScannedItemsCount()))
@@ -187,10 +186,12 @@ func (c *Crawler) Run() {
 
 func (c *Crawler) scanUrl(u *url.URL) error {
 	if u.String() != "" && !strings.Contains(u.String(), "javascript:") {
-		c.loadControl <- true
-		defer func() {
-			<-c.loadControl
-		}()
+		if c.config.Throttle != 0 {
+			c.loadControl <- true
+			defer func() {
+				<-c.loadControl
+			}()
+		}
 		c.StoreScannedItem(u.String())
 		log.Debug("Requesting url: ", u.String())
 		req, err := http.NewRequest("GET", u.String(), nil)
@@ -198,7 +199,7 @@ func (c *Crawler) scanUrl(u *url.URL) error {
 			log.Error("unable to create request: " + err.Error())
 			return fmt.Errorf("unable to create request %+v", err)
 		}
-		for key, value := range c.headers {
+		for key, value := range c.config.Headers {
 			req.Header.Set(key, value)
 		}
 		resp, err := c.client.Do(req)
@@ -216,10 +217,10 @@ func (c *Crawler) scanUrl(u *url.URL) error {
 		if err != nil {
 			body = []byte{}
 		}
-		if channel, exists := c.channels[resp.StatusCode]; exists {
+		if channel, exists := c.config.Channels[resp.StatusCode]; exists {
 			page := Page{Url: *u, Resp: *resp, Body: string(body)}
 			send := true
-			for _, filter := range c.filters {
+			for _, filter := range c.config.Filters {
 				log.Debug("Applying filter to page: ", u.String(), send)
 				send = send && filter(page)
 			}
@@ -274,14 +275,14 @@ func (c *Crawler) repairUrl(u *url.URL) (url.URL, error) {
 	if u.Scheme == "javascript" || (u.Host == "" && u.Path == "") {
 		return *u, fmt.Errorf("href is not an url")
 	}
-	if u.Host != "" && u.Host != c.root.Host {
-		return *u, fmt.Errorf("host outside of this site: %v", c.root.Host)
+	if u.Host != "" && u.Host != c.config.Root.Host {
+		return *u, fmt.Errorf("host outside of this site: %v", c.config.Root.Host)
 	}
 	if u.Scheme == "" {
-		u.Scheme = c.root.Scheme
+		u.Scheme = c.config.Root.Scheme
 	}
 	if u.Path != "" && u.Host == "" {
-		u.Host = c.root.Host
+		u.Host = c.config.Root.Host
 	}
 	if u.Scheme == "" {
 		return *u, fmt.Errorf("url incorrect")
@@ -289,7 +290,7 @@ func (c *Crawler) repairUrl(u *url.URL) (url.URL, error) {
 	if u.Path == "" {
 		u.Path = "/"
 	}
-	if !c.scanParent && !strings.HasPrefix(u.String(), c.root.String()) {
+	if !c.config.ScanParents && !strings.HasPrefix(u.String(), c.config.Root.String()) {
 		return *u, fmt.Errorf("path is parent")
 	}
 	return *u, nil
@@ -324,11 +325,11 @@ func (c *Crawler) containsString(item string) bool {
 }
 
 func (c *Crawler) getRedisKey() string {
-	return fmt.Sprintf("checked:%d:%s", c.usrCfg, c.root.Hostname())
+	return fmt.Sprintf("checked:%d:%s", c.config.Id, c.config.Root.Hostname())
 }
 
 func (c *Crawler) getQueueRedisKey() string {
-	return fmt.Sprintf("queue:%d:%s", c.usrCfg, c.root.Hostname())
+	return fmt.Sprintf("queue:%d:%s", c.config.Id, c.config.Root.Hostname())
 }
 
 func (c *Crawler) getQueueSize() int64 {
