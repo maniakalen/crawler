@@ -25,6 +25,7 @@ type Crawler struct {
 	cancel      *context.CancelFunc
 	rdb         *redis.Client
 	queueLock   sync.Mutex
+	countLock   sync.Mutex
 	config      *Config
 	loadControl chan bool
 }
@@ -57,15 +58,14 @@ type Channels map[int]chan Page
 // Number of workers
 var cr int = 0 // Number of workers
 func worker(i *int, c *Crawler) {
-	redisWorkerKey := c.getRedisKey("workers")
 	cr++
 	cr := cr
 	log.Info("Worker ", cr, " started")
-	c.rdb.Incr(*c.ctx, redisWorkerKey)
+	c.IncrWorkersCount()
 	defer log.Info("Worker ", cr, " stopped")
 	defer func() {
 		*i--
-		c.rdb.Decr(*c.ctx, redisWorkerKey)
+		c.DecrWorkersCount()
 	}()
 	empty := 0
 	for {
@@ -159,8 +159,7 @@ func (c *Crawler) Run() {
 	time.Sleep(1 * time.Second)
 	log.Info(fmt.Sprintf("Queue size: %d\n", c.getQueueSize()))
 	log.Info(fmt.Sprintf("Scanned items: %d\n", c.ScannedItemsCount()))
-	redisWorkerKey := c.getRedisKey("workers")
-	c.rdb.Set(*c.ctx, redisWorkerKey, 0, 0)
+	c.ResetWorkersCount()
 	go func() {
 		i := 0
 		reps := 0
@@ -343,4 +342,24 @@ func (c *Crawler) getQueueSize() int64 {
 		log.Error("Unable to get list length")
 	}
 	return res
+}
+
+func (c *Crawler) ResetWorkersCount() {
+	c.countLock.Lock()
+	defer c.countLock.Unlock()
+	redisWorkerKey := c.getRedisKey("workers")
+	c.rdb.Set(*c.ctx, redisWorkerKey, 0, 0)
+}
+
+func (c *Crawler) IncrWorkersCount() {
+	c.countLock.Lock()
+	defer c.countLock.Unlock()
+	redisWorkerKey := c.getRedisKey("workers")
+	c.rdb.Incr(*c.ctx, redisWorkerKey)
+}
+func (c *Crawler) DecrWorkersCount() {
+	c.countLock.Lock()
+	defer c.countLock.Unlock()
+	redisWorkerKey := c.getRedisKey("workers")
+	c.rdb.Incr(*c.ctx, redisWorkerKey)
 }
