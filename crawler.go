@@ -3,11 +3,13 @@ package crawler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,18 +33,19 @@ type Crawler struct {
 }
 
 type Config struct {
-	Root         *url.URL
-	RedisAddress string
-	RedisPort    int
-	RedisPass    string
-	RedisDb      int
-	Headers      map[string]string
-	ScanParents  bool
-	Filters      []func(p Page) bool
-	Channels     Channels
-	Id           int
-	Throttle     int
-	MaxWorkers   int
+	Root          *url.URL
+	RedisAddress  string
+	RedisPort     int
+	RedisPass     string
+	RedisDb       int
+	Headers       map[string]string
+	ScanParents   bool
+	Filters       []func(p Page) bool
+	Channels      Channels
+	Id            int
+	Throttle      int
+	MaxWorkers    int
+	MaxQueueEntry int
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -52,19 +55,38 @@ type Page struct {
 	Body string        // Response body string
 }
 
+type QueueEntry struct {
+	Url   string
+	Level int
+}
+
+func (q QueueEntry) serialize() string {
+	res, err := json.Marshal(q)
+	if err != nil {
+		log.Fatal("failed to marshal queue entry")
+	}
+	return string(res)
+}
+
+func (q *QueueEntry) unserialize(entry string) {
+	err := json.Unmarshal([]byte(entry), q)
+	if err != nil {
+		log.Fatal("Failed to unmarshal queue entry")
+	}
+}
+
 // Channels is a Page channels map where the index is the response code so we can define different behavior for the different resp codes
 type Channels map[int]chan Page
 
 // Number of workers
 var cr int = 0 // Number of workers
-func worker(i *int, c *Crawler) {
+func worker(c *Crawler) {
 	cr++
 	cr := cr
 	log.Info("Worker ", cr, " started")
 	c.IncrWorkersCount()
 	defer log.Info("Worker ", cr, " stopped")
 	defer func() {
-		*i--
 		c.DecrWorkersCount()
 	}()
 	empty := 0
@@ -75,28 +97,33 @@ func worker(i *int, c *Crawler) {
 			return
 		default:
 		}
-		ustring := c.fetchFromQueue()
+		entryString := c.fetchFromQueue()
+		entry := QueueEntry{}
+		entry.unserialize(entryString)
+		ustring := entry.Url
 		if len(ustring) == 0 {
 			if empty >= 10 {
 				return
 			}
 			empty++
-			time.Sleep(10 * time.Second)
+			time.Sleep(2 * time.Second)
 			continue
 		}
+
 		url, err := url.Parse(ustring)
 		if err != nil {
 			log.Error("Unable to parse url")
 		}
 		if url.Host == c.config.Root.Host {
 			log.Debug("Worker ", cr, " is scanning url: ", url.String())
-			err := c.scanUrl(url)
-			if err != nil {
-				log.Error("Error scanning url: " + err.Error())
-			}
+			go func() {
+				err := c.scanUrl(url, entry.Level)
+				if err != nil {
+					log.Error("Error scanning url: " + err.Error())
+				}
+			}()
 			log.Debug("Worker ", cr, " finished scanning url: ", url.String())
 		}
-		time.Sleep(500 * time.Microsecond)
 	}
 }
 
@@ -155,13 +182,16 @@ func (c *Crawler) Close() {
 
 // Run is the crawler start method
 func (c *Crawler) Run() {
-	c.addToQueue((*c.config.Root).String())
+	entry := QueueEntry{
+		Url:   (*c.config.Root).String(),
+		Level: c.config.MaxQueueEntry,
+	}
+	c.addToQueue(entry.serialize())
 	time.Sleep(1 * time.Second)
 	log.Info(fmt.Sprintf("Queue size: %d\n", c.getQueueSize()))
 	log.Info(fmt.Sprintf("Scanned items: %d\n", c.ScannedItemsCount()))
 	c.ResetWorkersCount()
 	go func() {
-		i := 0
 		reps := 0
 		for {
 			select {
@@ -169,27 +199,26 @@ func (c *Crawler) Run() {
 				log.Debug("Crawler is closing")
 				return
 			default:
-				if c.getQueueSize() > 0 && (c.config.MaxWorkers == 0 || i < c.config.MaxWorkers) {
-					i++
-					go worker(&i, c)
-					fmt.Printf("Executed worker for %s. %d more workers to run\n", c.config.Root.String(), c.config.MaxWorkers-i)
-				} else if c.getQueueSize() == 0 && i == 0 {
-					log.Debug("Crawler is done. closing")
-					time.Sleep(5 * time.Second)
+				count := c.GetActiveWorkersCount()
+				if c.getQueueSize() > 0 && (c.config.MaxWorkers == 0 || count < c.config.MaxWorkers) {
+					go worker(c)
+				} else if c.getQueueSize() == 0 && count == 0 {
+					log.Info("Crawler is done. closing\n")
+					time.Sleep(1 * time.Second)
 					reps++
-					if reps > 5 {
+					if reps > 25 {
 						c.Close()
 					}
 				} else {
-					log.Debug("Crawler is waiting for workers to finish")
-					time.Sleep(5 * time.Second)
+					//fmt.Printf("Crawler %s is waiting for workers to finish %d\n", c.config.Root.String(), c.getQueueSize())
+					time.Sleep(1 * time.Second)
 				}
 			}
 		}
 	}()
 }
 
-func (c *Crawler) scanUrl(u *url.URL) error {
+func (c *Crawler) scanUrl(u *url.URL, level int) error {
 	if u.String() != "" && !strings.Contains(u.String(), "javascript:") {
 		if c.config.Throttle != 0 {
 			c.loadControl <- true
@@ -234,21 +263,23 @@ func (c *Crawler) scanUrl(u *url.URL) error {
 				channel <- page
 			}
 		}
-		if len(resp.Header["Content-Type"]) > 0 && strings.HasPrefix(resp.Header["Content-Type"][0], "text/html") {
+		if level > 0 && len(resp.Header["Content-Type"]) > 0 && strings.HasPrefix(resp.Header["Content-Type"][0], "text/html") {
+			dur := duration()
 			doc, err := html.Parse(bodyReader)
 			if err != nil {
 				log.Error("unable to parse page body: " + err.Error())
 				return fmt.Errorf("unable to parse page body")
 			}
 			log.Debug("Scanning nodes: ", u.String())
-			c.scanNode(doc)
+			c.scanNode(doc, level)
+			log.Debug(fmt.Sprintf("Node scan for %s done in %v\n", u.String(), dur()))
 		}
 
 	}
 	return nil
 }
 
-func (c *Crawler) scanNode(n *html.Node) {
+func (c *Crawler) scanNode(n *html.Node, level int) {
 	if n.Type == html.ElementNode && n.Data == "a" {
 		for _, a := range n.Attr {
 			if a.Key == "href" {
@@ -262,7 +293,11 @@ func (c *Crawler) scanNode(n *html.Node) {
 					log.Debug(fmt.Sprintf("Contains url: %+v", c.containsString(u.String())))
 					if err == nil && u.String() != "" && !strings.Contains(u.String(), "javascript:") && !c.containsString(u.String()) {
 						log.Debug("Adding url to queue channel: ", u.String())
-						c.addToQueue(u.String())
+						entry := QueueEntry{
+							Url:   u.String(),
+							Level: level - 1,
+						}
+						c.addToQueue(entry.serialize())
 					}
 				} else {
 					log.Error("unable to parse url: " + err.Error())
@@ -272,7 +307,7 @@ func (c *Crawler) scanNode(n *html.Node) {
 		}
 	}
 	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		c.scanNode(child)
+		c.scanNode(child, level)
 	}
 }
 
@@ -306,6 +341,7 @@ func (c *Crawler) addToQueue(item string) {
 	key := c.getRedisKey("queue")
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
+	log.Debug("Adding to queue ", item)
 	c.rdb.ZAdd(*c.ctx, key, redis.Z{Member: item, Score: 1}).Result()
 }
 
@@ -320,7 +356,9 @@ func (c *Crawler) fetchFromQueue() string {
 	if len(res) == 0 {
 		return ""
 	}
-	return res[0].Member.(string)
+	mem := res[0].Member.(string)
+	log.Debug("Fetch from queue: ", mem)
+	return mem
 }
 
 func (c *Crawler) containsString(item string) bool {
@@ -361,5 +399,27 @@ func (c *Crawler) DecrWorkersCount() {
 	c.countLock.Lock()
 	defer c.countLock.Unlock()
 	redisWorkerKey := c.getRedisKey("workers")
-	c.rdb.Incr(*c.ctx, redisWorkerKey)
+	c.rdb.IncrBy(*c.ctx, redisWorkerKey, -1)
+}
+
+func (c *Crawler) GetActiveWorkersCount() int {
+	c.countLock.Lock()
+	defer c.countLock.Unlock()
+	redisWorkerKey := c.getRedisKey("workers")
+	res, err := c.rdb.Get(*c.ctx, redisWorkerKey).Result()
+	if err != nil {
+		log.Fatal("Failed to get workers count from redis")
+	}
+	count, err := strconv.Atoi(res)
+	if err != nil {
+		log.Fatal("Failed to get workers count")
+	}
+	return count
+}
+
+func duration() func() time.Duration {
+	start := time.Now()
+	return func() time.Duration {
+		return time.Since(start)
+	}
 }
