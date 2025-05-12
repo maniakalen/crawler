@@ -434,14 +434,12 @@ func (c *Crawler) GetActiveWorkersCount() int {
 }
 
 func (c *Crawler) WaitDelay() {
-	fmt.Println("Waiting for delay")
 	if c.delay.Nanoseconds() > 0 {
 		<-c.delayChan
 	}
 }
 
 func (c *Crawler) ProduceDelay() {
-	fmt.Println("Producing delay")
 	if c.delay.Nanoseconds() > 0 {
 		time.Sleep(c.delay)
 		c.delayChan <- true
