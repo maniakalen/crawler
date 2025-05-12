@@ -17,6 +17,7 @@ import (
 	log "github.com/maniakalen/crawler/log"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/maniakalen/crawler/robots"
 	"golang.org/x/net/html"
 )
 
@@ -30,6 +31,8 @@ type Crawler struct {
 	countLock   sync.Mutex
 	config      *Config
 	loadControl chan bool
+	delay       time.Duration
+	delayChan   chan bool
 }
 
 type Config struct {
@@ -96,33 +99,36 @@ func worker(c *Crawler) {
 			log.Debug("Worker ", cr, " is closing due to context")
 			return
 		default:
-		}
-		entryString := c.fetchFromQueue()
-		entry := QueueEntry{}
-		entry.unserialize(entryString)
-		ustring := entry.Url
-		if len(ustring) == 0 {
-			if empty >= 10 {
-				return
-			}
-			empty++
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		url, err := url.Parse(ustring)
-		if err != nil {
-			log.Error("Unable to parse url")
-		}
-		if url.Host == c.config.Root.Host {
-			log.Debug("Worker ", cr, " is scanning url: ", url.String())
-			go func() {
-				err := c.scanUrl(url, entry.Level)
-				if err != nil {
-					log.Error("Error scanning url: " + err.Error())
+			c.WaitDelay()
+			entryString := c.fetchFromQueue()
+			entry := QueueEntry{}
+			entry.unserialize(entryString)
+			ustring := entry.Url
+			if len(ustring) == 0 {
+				if empty >= 10 {
+					return
 				}
-			}()
-			log.Debug("Worker ", cr, " finished scanning url: ", url.String())
+				empty++
+				time.Sleep(2 * time.Second)
+				c.ProduceDelay()
+				continue
+			}
+
+			url, err := url.Parse(ustring)
+			if err != nil {
+				log.Error("Unable to parse url")
+			}
+			if url.Host == c.config.Root.Host {
+				log.Debug("Worker ", cr, " is scanning url: ", url.String())
+				go func() {
+					err := c.scanUrl(url, entry.Level)
+					if err != nil {
+						log.Error("Error scanning url: " + err.Error())
+					}
+				}()
+				log.Debug("Worker ", cr, " finished scanning url: ", url.String())
+			}
+			c.ProduceDelay()
 		}
 	}
 }
@@ -144,13 +150,14 @@ func New(parentCtx context.Context, config *Config) (*Crawler, error) {
 		os.Exit(1)
 	}
 	crawler := &Crawler{
-		client: client,
-		ctx:    &ctx,
-		cancel: &cancel,
-		rdb:    rdb,
-		config: config,
+		client:    client,
+		ctx:       &ctx,
+		cancel:    &cancel,
+		rdb:       rdb,
+		config:    config,
+		delayChan: make(chan bool),
 	}
-	if config.Throttle != 0 {
+	if config.Throttle > 0 {
 		crawler.loadControl = make(chan bool, config.Throttle)
 	}
 	return crawler, nil
@@ -182,6 +189,11 @@ func (c *Crawler) Close() {
 
 // Run is the crawler start method
 func (c *Crawler) Run() {
+	allowed, delay := robots.IsURLAllowed((*c.config.Root).String())
+	if !allowed {
+		return
+	}
+	c.delay = delay
 	entry := QueueEntry{
 		Url:   (*c.config.Root).String(),
 		Level: c.config.MaxQueueEntry,
@@ -204,9 +216,13 @@ func (c *Crawler) Run() {
 					go worker(c)
 				} else if c.getQueueSize() == 0 && count == 0 {
 					log.Info("Crawler is done. closing\n")
-					time.Sleep(1 * time.Second)
+					if delay.Seconds() > 0 {
+						time.Sleep(delay)
+					} else {
+						time.Sleep(1 * time.Second)
+					}
 					reps++
-					if reps > 25 {
+					if reps > 15 {
 						c.Close()
 					}
 				} else {
@@ -220,7 +236,7 @@ func (c *Crawler) Run() {
 
 func (c *Crawler) scanUrl(u *url.URL, level int) error {
 	if u.String() != "" && !strings.Contains(u.String(), "javascript:") {
-		if c.config.Throttle != 0 {
+		if c.config.Throttle > 0 {
 			c.loadControl <- true
 			defer func() {
 				<-c.loadControl
@@ -415,6 +431,21 @@ func (c *Crawler) GetActiveWorkersCount() int {
 		log.Fatal("Failed to get workers count")
 	}
 	return count
+}
+
+func (c *Crawler) WaitDelay() {
+	fmt.Println("Waiting for delay")
+	if c.delay.Nanoseconds() > 0 {
+		<-c.delayChan
+	}
+}
+
+func (c *Crawler) ProduceDelay() {
+	fmt.Println("Producing delay")
+	if c.delay.Nanoseconds() > 0 {
+		time.Sleep(c.delay)
+		c.delayChan <- true
+	}
 }
 
 func duration() func() time.Duration {
