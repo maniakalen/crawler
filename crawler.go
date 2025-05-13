@@ -128,7 +128,6 @@ func worker(c *Crawler) {
 				}()
 				log.Debug("Worker ", cr, " finished scanning url: ", url.String())
 			}
-			c.ProduceDelay()
 		}
 	}
 }
@@ -194,6 +193,7 @@ func (c *Crawler) Run() {
 		return
 	}
 	c.delay = delay
+	go c.ProduceDelay()
 	entry := QueueEntry{
 		Url:   (*c.config.Root).String(),
 		Level: c.config.MaxQueueEntry,
@@ -441,8 +441,15 @@ func (c *Crawler) WaitDelay() {
 
 func (c *Crawler) ProduceDelay() {
 	if c.delay.Nanoseconds() > 0 {
-		time.Sleep(c.delay)
-		c.delayChan <- true
+		for {
+			select {
+			case <-(*c.ctx).Done():
+				return
+			default:
+				time.Sleep(c.delay)
+				c.delayChan <- true
+			}
+		}
 	}
 }
 
