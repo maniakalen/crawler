@@ -234,6 +234,8 @@ func (c *Crawler) Run() {
 	}()
 }
 
+var bmux sync.Mutex
+
 func (c *Crawler) scanUrl(u *url.URL, level int) error {
 	if u.String() != "" && !strings.Contains(u.String(), "javascript:") {
 		if c.config.Throttle > 0 {
@@ -257,6 +259,9 @@ func (c *Crawler) scanUrl(u *url.URL, level int) error {
 			return fmt.Errorf("unable to fetch url %+v", err)
 		}
 		log.Debug("Received response: ", resp.Status, u.String())
+		bmux.Lock()
+		c.rdb.IncrBy(*c.ctx, "bandwidthused", resp.ContentLength)
+		bmux.Unlock()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Error("unable to read page body: " + err.Error())
