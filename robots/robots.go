@@ -98,6 +98,21 @@ func IsURLAllowed(targetURL string) (bool, time.Duration) {
 	return allowed, robotsEntry.crawlDelay
 }
 
+func GetSitemaps(targetURL string) ([]string, error) {
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return nil, err
+	}
+
+	domain := parsedURL.Hostname()
+	robotsEntry, err := GlobalRobotsCache.GetRobotsForDomain(domain)
+	if err != nil {
+		// Default to allowed but with conservative delay
+		return nil, err
+	}
+	return robotsEntry.data.Sitemaps, nil
+}
+
 func createEmptyRobotsEntry() *robotsEntry {
 	return &robotsEntry{}
 }

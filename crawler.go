@@ -29,10 +29,12 @@ type Crawler struct {
 	rdb         *redis.Client
 	queueLock   sync.Mutex
 	countLock   sync.Mutex
+	delayLock   sync.Mutex
 	config      *Config
 	loadControl chan bool
 	delay       time.Duration
 	delayChan   chan bool
+	delayed     bool
 }
 
 type Config struct {
@@ -49,6 +51,8 @@ type Config struct {
 	Throttle      int
 	MaxWorkers    int
 	MaxQueueEntry int
+	Delay         float64
+	DelayListener chan float64
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -154,6 +158,7 @@ func New(parentCtx context.Context, config *Config) (*Crawler, error) {
 		cancel:    &cancel,
 		rdb:       rdb,
 		config:    config,
+		delay:     time.Duration(config.Delay) * time.Second,
 		delayChan: make(chan bool),
 	}
 	if config.Throttle > 0 {
@@ -182,27 +187,61 @@ func (c *Crawler) Done() <-chan struct{} {
 
 func (c *Crawler) Close() {
 	log.Info("Closing")
+	c.ClearQueue()
+	c.ResetWorkersCount()
 	(*c.cancel)()
 	c.rdb.Close()
 }
 
 // Run is the crawler start method
 func (c *Crawler) Run() {
+	fmt.Println("Parsing sitemap for: ", (*c.config.Root).String())
+	sitemaps, err := robots.GetSitemaps((*c.config.Root).String())
+	if err != nil {
+		log.Error("Failed to fetch sitemaps list")
+	} else {
+		urls := make([]robots.URL, 0)
+		for _, sitemap := range sitemaps {
+			list := robots.ExtractURLs(sitemap)
+			urls = append(urls, list...)
+		}
+		for _, url := range urls {
+			if allowed, _ := robots.IsURLAllowed(url.Loc); allowed {
+				entry := QueueEntry{
+					Url:   url.Loc,
+					Level: c.config.MaxQueueEntry,
+				}
+				c.addToQueue(entry.serialize())
+			}
+		}
+	}
 	allowed, delay := robots.IsURLAllowed((*c.config.Root).String())
-	if !allowed {
-		return
+	if allowed {
+		entry := QueueEntry{
+			Url:   (*c.config.Root).String(),
+			Level: c.config.MaxQueueEntry,
+		}
+		c.addToQueue(entry.serialize())
+		time.Sleep(1 * time.Second)
 	}
-	c.delay = delay
+	if delay.Microseconds() > c.delay.Microseconds() {
+		c.delay = delay
+		go func() {
+			if c.config.DelayListener != nil {
+				select {
+				case c.config.DelayListener <- delay.Seconds():
+				case <-(*c.ctx).Done():
+				}
+			}
+		}()
+	}
 	go c.ProduceDelay()
-	entry := QueueEntry{
-		Url:   (*c.config.Root).String(),
-		Level: c.config.MaxQueueEntry,
-	}
-	c.addToQueue(entry.serialize())
-	time.Sleep(1 * time.Second)
+
 	log.Info(fmt.Sprintf("Queue size: %d\n", c.getQueueSize()))
 	log.Info(fmt.Sprintf("Scanned items: %d\n", c.ScannedItemsCount()))
 	c.ResetWorkersCount()
+	log.Info(fmt.Sprintf("%+v\n", c))
+	log.Info(fmt.Sprintf("%+v\n", *c.config))
 	go func() {
 		reps := 0
 		for {
@@ -258,6 +297,16 @@ func (c *Crawler) scanUrl(u *url.URL, level int) error {
 		if err != nil {
 			return fmt.Errorf("unable to fetch url %+v", err)
 		}
+		if resp.StatusCode == 429 {
+			c.delayLock.Lock()
+			if c.delay.Nanoseconds() == 0 {
+				fmt.Println("Producing delay")
+				go c.ProduceDelay()
+			}
+			c.delay = time.Duration(c.delay.Seconds()+1) * time.Second
+			<-time.After(5 * time.Second)
+			c.delayLock.Unlock()
+		}
 		log.Debug("Received response: ", resp.Status, u.String())
 		bmux.Lock()
 		c.rdb.IncrBy(*c.ctx, "bandwidthused", resp.ContentLength)
@@ -304,15 +353,9 @@ func (c *Crawler) scanNode(n *html.Node, level int) {
 	if n.Type == html.ElementNode && n.Data == "a" {
 		for _, a := range n.Attr {
 			if a.Key == "href" {
-				log.Debug("Found href: ", a.Val)
 				if u, err := url.Parse(strings.Trim(a.Val, " ")); err == nil {
-					log.Debug("Parsed url: ", u.String())
 					u, err := c.repairUrl(u)
-					log.Debug("Repaired url: ", u.String())
-					log.Debug(fmt.Sprintf("Error: %+v", err))
-					log.Debug(fmt.Sprintf("Contains: %+v", strings.Contains(u.String(), "javascript:")))
-					log.Debug(fmt.Sprintf("Contains url: %+v", c.containsString(u.String())))
-					if err == nil && u.String() != "" && !strings.Contains(u.String(), "javascript:") && !c.containsString(u.String()) {
+					if allowed, _ := robots.IsURLAllowed(u.String()); allowed && err == nil && u.String() != "" && !strings.Contains(u.String(), "javascript:") && !c.containsString(u.String()) {
 						log.Debug("Adding url to queue channel: ", u.String())
 						entry := QueueEntry{
 							Url:   u.String(),
@@ -403,6 +446,13 @@ func (c *Crawler) getQueueSize() int64 {
 	return res
 }
 
+func (c *Crawler) ClearQueue() {
+	key := c.getRedisKey("queue")
+	c.queueLock.Lock()
+	defer c.queueLock.Unlock()
+	c.rdb.Del(*c.ctx, key).Result()
+}
+
 func (c *Crawler) ResetWorkersCount() {
 	c.countLock.Lock()
 	defer c.countLock.Unlock()
@@ -439,13 +489,14 @@ func (c *Crawler) GetActiveWorkersCount() int {
 }
 
 func (c *Crawler) WaitDelay() {
-	if c.delay.Nanoseconds() > 0 {
+	if c.delayed && c.delay.Nanoseconds() > 0 {
 		<-c.delayChan
 	}
 }
 
 func (c *Crawler) ProduceDelay() {
-	if c.delay.Nanoseconds() > 0 {
+	if !c.delayed && c.delay.Nanoseconds() > 0 {
+		c.delayed = true
 		for {
 			select {
 			case <-(*c.ctx).Done():
