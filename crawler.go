@@ -45,7 +45,7 @@ type Config struct {
 	RedisDb       int
 	Headers       map[string]string
 	ScanParents   bool
-	Filters       []func(p Page) bool
+	Filters       []func(p Page, config *Config) bool
 	Channels      Channels
 	Id            int
 	Throttle      int
@@ -53,6 +53,7 @@ type Config struct {
 	MaxQueueEntry int
 	Delay         float64
 	DelayListener chan float64
+	LanguageCode  string
 }
 
 // Page is a struct that carries the scanned url, response and response body string
@@ -209,7 +210,7 @@ func (c *Crawler) Run() {
 			if allowed, _ := robots.IsURLAllowed(url.Loc); allowed {
 				entry := QueueEntry{
 					Url:   url.Loc,
-					Level: c.config.MaxQueueEntry,
+					Level: 1,
 				}
 				c.addToQueue(entry.serialize())
 			}
@@ -326,7 +327,7 @@ func (c *Crawler) scanUrl(u *url.URL, level int) error {
 			send := true
 			for _, filter := range c.config.Filters {
 				log.Debug("Applying filter to page: ", u.String(), send)
-				send = send && filter(page)
+				send = send && filter(page, c.config)
 			}
 			if send {
 				log.Debug("Sending page to channel: ", u.String())
@@ -421,7 +422,7 @@ func (c *Crawler) fetchFromQueue() string {
 		return ""
 	}
 	mem := res[0].Member.(string)
-	log.Debug("Fetch from queue: ", mem)
+	log.Debug("fetch from queue: ", mem)
 	return mem
 }
 

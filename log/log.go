@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"time"
 )
 
 const (
@@ -24,30 +25,30 @@ func init() {
 
 func Debug(v ...interface{}) {
 	if verbosity&DEBUG == DEBUG {
-		log.Printf("[DEBUG]: %s", fmt.Sprint(v...))
+		log.Printf("[%s][DEBUG]: %s", time.Now().Format("02/01/2006 15:04:05"), fmt.Sprint(v...))
 	}
 }
 
 func Error(v ...interface{}) {
 	if verbosity&ERROR == ERROR {
-		log.Printf("[ERROR]: %s", fmt.Sprint(v...))
+		log.Printf("[%s][ERROR]: %s", time.Now().Format("02/01/2006 15:04:05"), fmt.Sprint(v...))
 	}
 }
 
 func Fatal(v ...interface{}) {
 	if verbosity&FATAL == FATAL {
-		log.Printf("[FATAL]: %s", fmt.Sprint(v...))
+		log.Printf("[%s][FATAL]: %s", time.Now().Format("02/01/2006 15:04:05"), fmt.Sprint(v...))
 	}
 }
 
 func Info(v ...interface{}) {
 	if verbosity&INFO == INFO {
-		log.Printf("[INFO]: %s", fmt.Sprint(v...))
+		log.Printf("[%s][INFO]: %s", time.Now().Format("02/01/2006 15:04:05"), fmt.Sprint(v...))
 	}
 }
 
 func Warn(v ...interface{}) {
 	if verbosity&WARN == WARN {
-		log.Printf("[WARN]: %s", fmt.Sprint(v...))
+		log.Printf("[%s][WARN]: %s", time.Now().Format("02/01/2006 15:04:05"), fmt.Sprint(v...))
 	}
 }
