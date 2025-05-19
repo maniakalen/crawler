@@ -210,7 +210,7 @@ func (c *Crawler) Run() {
 			if allowed, _ := robots.IsURLAllowed(url.Loc); allowed {
 				entry := QueueEntry{
 					Url:   url.Loc,
-					Level: 1,
+					Level: c.config.MaxQueueEntry,
 				}
 				c.addToQueue(entry.serialize())
 			}
