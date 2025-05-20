@@ -37,6 +37,8 @@ type Crawler struct {
 	delayed     bool
 }
 
+// Config is a struct used to configure the crawler
+// Filters is a list of methods used to filter the pages BEFORE being processed or sent back to the initiator
 type Config struct {
 	Root          *url.URL
 	RedisAddress  string
@@ -322,28 +324,28 @@ func (c *Crawler) scanUrl(u *url.URL, level int) error {
 		if err != nil {
 			body = []byte{}
 		}
-		if channel, exists := c.config.Channels[resp.StatusCode]; exists {
-			page := Page{Url: *u, Resp: *resp, Body: string(body)}
-			send := true
-			for _, filter := range c.config.Filters {
-				log.Debug("Applying filter to page: ", u.String(), send)
-				send = send && filter(page, c.config)
-			}
-			if send {
+		page := Page{Url: *u, Resp: *resp, Body: string(body)}
+		process := true
+		for _, filter := range c.config.Filters {
+			log.Debug("Applying filter to page: ", u.String(), process)
+			process = process && filter(page, c.config)
+		}
+		if process {
+			if channel, exists := c.config.Channels[resp.StatusCode]; exists {
 				log.Debug("Sending page to channel: ", u.String())
 				channel <- page
 			}
-		}
-		if level > 0 && len(resp.Header["Content-Type"]) > 0 && strings.HasPrefix(resp.Header["Content-Type"][0], "text/html") {
-			dur := duration()
-			doc, err := html.Parse(bodyReader)
-			if err != nil {
-				log.Error("unable to parse page body: " + err.Error())
-				return fmt.Errorf("unable to parse page body")
+			if level > 0 && len(resp.Header["Content-Type"]) > 0 && strings.HasPrefix(resp.Header["Content-Type"][0], "text/html") {
+				dur := duration()
+				doc, err := html.Parse(bodyReader)
+				if err != nil {
+					log.Error("unable to parse page body: " + err.Error())
+					return fmt.Errorf("unable to parse page body")
+				}
+				log.Debug("Scanning nodes: ", u.String())
+				c.scanNode(doc, level)
+				log.Debug(fmt.Sprintf("Node scan for %s done in %v\n", u.String(), dur()))
 			}
-			log.Debug("Scanning nodes: ", u.String())
-			c.scanNode(doc, level)
-			log.Debug(fmt.Sprintf("Node scan for %s done in %v\n", u.String(), dur()))
 		}
 
 	}
