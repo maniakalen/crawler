@@ -3,7 +3,6 @@ package crawler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,26 +64,6 @@ type Page struct {
 	Body string        // Response body string
 }
 
-type QueueEntry struct {
-	Url   string
-	Level int
-}
-
-func (q QueueEntry) serialize() string {
-	res, err := json.Marshal(q)
-	if err != nil {
-		log.Fatal("failed to marshal queue entry")
-	}
-	return string(res)
-}
-
-func (q *QueueEntry) unserialize(entry string) {
-	err := json.Unmarshal([]byte(entry), q)
-	if err != nil {
-		log.Fatal("Failed to unmarshal queue entry")
-	}
-}
-
 // Channels is a Page channels map where the index is the response code so we can define different behavior for the different resp codes
 type Channels map[int]chan Page
 
@@ -107,10 +86,7 @@ func worker(c *Crawler) {
 			return
 		default:
 			c.WaitDelay()
-			entryString := c.fetchFromQueue()
-			entry := QueueEntry{}
-			entry.unserialize(entryString)
-			ustring := entry.Url
+			ustring, depth := c.fetchFromQueue()
 			if len(ustring) == 0 {
 				if empty >= 10 {
 					return
@@ -128,7 +104,7 @@ func worker(c *Crawler) {
 			if url.Host == c.config.Root.Host {
 				log.Debug("Worker ", cr, " is scanning url: ", url.String())
 				go func() {
-					err := c.scanUrl(url, entry.Level)
+					err := c.scanUrl(url, depth)
 					if err != nil {
 						log.Error("Error scanning url: " + err.Error())
 					}
@@ -210,21 +186,13 @@ func (c *Crawler) Run() {
 		}
 		for _, url := range urls {
 			if allowed, _ := robots.IsURLAllowed(url.Loc); allowed {
-				entry := QueueEntry{
-					Url:   url.Loc,
-					Level: c.config.MaxQueueEntry,
-				}
-				c.addToQueue(entry.serialize())
+				c.addToQueue(url.Loc, c.config.MaxQueueEntry)
 			}
 		}
 	}
 	allowed, delay := robots.IsURLAllowed((*c.config.Root).String())
 	if allowed {
-		entry := QueueEntry{
-			Url:   (*c.config.Root).String(),
-			Level: c.config.MaxQueueEntry,
-		}
-		c.addToQueue(entry.serialize())
+		c.addToQueue((*c.config.Root).String(), c.config.MaxQueueEntry)
 		time.Sleep(1 * time.Second)
 	}
 	if delay.Microseconds() > c.delay.Microseconds() {
@@ -360,11 +328,7 @@ func (c *Crawler) scanNode(n *html.Node, level int) {
 					u, err := c.repairUrl(u)
 					if allowed, _ := robots.IsURLAllowed(u.String()); allowed && err == nil && u.String() != "" && !strings.Contains(u.String(), "javascript:") && !c.containsString(u.String()) {
 						log.Debug("Adding url to queue channel: ", u.String())
-						entry := QueueEntry{
-							Url:   u.String(),
-							Level: level - 1,
-						}
-						c.addToQueue(entry.serialize())
+						c.addToQueue(u.String(), level-1)
 					}
 				} else {
 					log.Error("unable to parse url: " + err.Error())
@@ -404,15 +368,19 @@ func (c *Crawler) repairUrl(u *url.URL) (url.URL, error) {
 
 }
 
-func (c *Crawler) addToQueue(item string) {
+func (c *Crawler) addToQueue(item string, depth int) {
 	key := c.getRedisKey("queue")
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
 	log.Debug("Adding to queue ", item)
-	c.rdb.ZAdd(*c.ctx, key, redis.Z{Member: item, Score: 1}).Result()
+	added, err := c.rdb.ZAdd(*c.ctx, key, redis.Z{Member: item, Score: 1}).Result()
+	if err == nil && added > 0 {
+		depthsKey := c.getRedisKey("depths")
+		c.rdb.HSet(*c.ctx, depthsKey, item, strconv.Itoa(depth))
+	}
 }
 
-func (c *Crawler) fetchFromQueue() string {
+func (c *Crawler) fetchFromQueue() (string, int) {
 	key := c.getRedisKey("queue")
 	c.queueLock.Lock()
 	defer c.queueLock.Unlock()
@@ -421,11 +389,20 @@ func (c *Crawler) fetchFromQueue() string {
 		log.Error(err)
 	}
 	if len(res) == 0 {
-		return ""
+		return "", 0
 	}
 	mem := res[0].Member.(string)
-	log.Debug("fetch from queue: ", mem)
-	return mem
+	depthsKey := c.getRedisKey("depths")
+	d, err := c.rdb.HGet(*c.ctx, depthsKey, mem).Result()
+	if err != nil {
+		return "", 0
+	}
+	depth, err := strconv.Atoi(d)
+	if err != nil {
+		return "", 0
+	}
+	c.rdb.HDel(*c.ctx, depthsKey, mem).Result()
+	return mem, depth
 }
 
 func (c *Crawler) containsString(item string) bool {
