@@ -174,26 +174,16 @@ func (c *Crawler) Close() {
 
 // Run is the crawler start method
 func (c *Crawler) Run() {
-	fmt.Println("Parsing sitemap for: ", (*c.config.Root).String())
-	sitemaps, err := robots.GetSitemaps((*c.config.Root).String())
-	if err != nil {
-		log.Error("Failed to fetch sitemaps list")
-	} else {
-		urls := make([]robots.URL, 0)
-		for _, sitemap := range sitemaps {
-			list := robots.ExtractURLs(sitemap)
-			urls = append(urls, list...)
-		}
-		for _, url := range urls {
-			if allowed, _ := robots.IsURLAllowed(url.Loc); allowed {
-				c.addToQueue(url.Loc, c.config.MaxQueueEntry)
-			}
-		}
-	}
 	allowed, delay := robots.IsURLAllowed((*c.config.Root).String())
-	if allowed {
-		c.addToQueue((*c.config.Root).String(), c.config.MaxQueueEntry)
-		time.Sleep(1 * time.Second)
+	if c.getQueueSize() == 0 {
+		fmt.Println("Parsing sitemap for: ", (*c.config.Root).String())
+		c.processSitemap()
+		if allowed {
+			fmt.Println("Adding root url: ", (*c.config.Root).String())
+			c.addToQueue((*c.config.Root).String(), c.config.MaxQueueEntry)
+			time.Sleep(1 * time.Second)
+		}
+		c.ResetWorkersCount()
 	}
 	if delay.Microseconds() > c.delay.Microseconds() {
 		c.delay = delay
@@ -210,7 +200,6 @@ func (c *Crawler) Run() {
 
 	log.Info(fmt.Sprintf("Queue size: %d\n", c.getQueueSize()))
 	log.Info(fmt.Sprintf("Scanned items: %d\n", c.ScannedItemsCount()))
-	c.ResetWorkersCount()
 	log.Info(fmt.Sprintf("%+v\n", c))
 	log.Info(fmt.Sprintf("%+v\n", *c.config))
 	go func() {
@@ -244,6 +233,24 @@ func (c *Crawler) Run() {
 	}()
 }
 
+func (c *Crawler) processSitemap() {
+	sitemaps, err := robots.GetSitemaps((*c.config.Root).String())
+	if err != nil {
+		log.Error("Failed to fetch sitemaps list")
+	} else {
+		urls := make([]robots.URL, 0)
+		for _, sitemap := range sitemaps {
+			list := robots.ExtractURLs(sitemap)
+			urls = append(urls, list...)
+		}
+		for _, url := range urls {
+			if allowed, _ := robots.IsURLAllowed(url.Loc); allowed {
+				c.addToQueue(url.Loc, 1)
+			}
+		}
+	}
+}
+
 var bmux sync.Mutex
 
 func (c *Crawler) scanUrl(u *url.URL, level int) error {
@@ -254,7 +261,6 @@ func (c *Crawler) scanUrl(u *url.URL, level int) error {
 				<-c.loadControl
 			}()
 		}
-		c.StoreScannedItem(u.String())
 		log.Debug("Requesting url: ", u.String())
 		req, err := http.NewRequest("GET", u.String(), nil)
 		if err != nil {
@@ -277,6 +283,9 @@ func (c *Crawler) scanUrl(u *url.URL, level int) error {
 			c.delay = time.Duration(c.delay.Seconds()+1) * time.Second
 			<-time.After(5 * time.Second)
 			c.delayLock.Unlock()
+		}
+		if resp.StatusCode < 300 {
+			c.StoreScannedItem(u.String())
 		}
 		log.Debug("Received response: ", resp.Status, u.String())
 		bmux.Lock()
