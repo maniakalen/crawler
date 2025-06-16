@@ -1,65 +1,61 @@
-// Package crawler provides functionalities to crawl a given website's pages
 package crawler
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
+	"log/slog"
+	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	log "github.com/maniakalen/crawler/log"
-	"github.com/redis/go-redis/v9"
-
+	"github.com/PuerkitoBio/goquery"
+	"github.com/maniakalen/crawler/queue"
 	"github.com/maniakalen/crawler/robots"
-	"golang.org/x/net/html"
+	"github.com/temoto/robotstxt"
 )
 
-// Crawler is the main package object used to initialize the crawl
-type Crawler struct {
-	client      *http.Client
-	ctx         *context.Context
-	cancel      *context.CancelFunc
-	rdb         *redis.Client
-	queueLock   sync.Mutex
-	countLock   sync.Mutex
-	delayLock   sync.Mutex
-	config      *Config
-	loadControl chan bool
-	delay       time.Duration
-	delayChan   chan bool
-	delayed     bool
+// Config holds crawler configuration
+type Config struct {
+	StartURL           string
+	AllowedDomains     []string // Domains to stay within
+	UserAgents         []string
+	CrawlDelay         time.Duration // Delay between requests to the same domain
+	MaxDepth           int           // Maximum crawl depth
+	MaxRetries         int           // Max retries for a failed request
+	RequestTimeout     time.Duration
+	QueueIdleTimeout   time.Duration
+	ProxyURL           string // e.g., "http://user:pass@host:port"
+	RobotsUserAgent    string // User agent to use for robots.txt checks
+	ConcurrentRequests int    // Number of concurrent fetch workers
+	Channels           Channels
+	Headers            map[string]string
+	LanguageCode       string
 }
 
-// Config is a struct used to configure the crawler
-// Filters is a list of methods used to filter the pages BEFORE being processed or sent back to the initiator
-type Config struct {
-	Root          *url.URL
-	RedisAddress  string
-	RedisPort     int
-	RedisPass     string
-	RedisDb       int
-	Headers       map[string]string
-	ScanParents   bool
-	Filters       []func(p Page, config *Config) bool
-	Channels      Channels
-	Id            int
-	Throttle      int
-	MaxWorkers    int
-	MaxQueueEntry int
-	Delay         float64
-	DelayListener chan float64
-	LanguageCode  string
+// Crawler represents the web crawler
+type Crawler struct {
+	config      Config
+	httpClient  *http.Client
+	robotsData  map[string]*robotstxt.RobotsData // Host -> RobotsData
+	visited     map[string]bool
+	visitedLock sync.Mutex
+	queue       queue.QueueInterface
+	wg          sync.WaitGroup
+	//queue       chan CrawlItem
 }
+
+// CrawlItem represents an item in the crawl queue
 
 // Page is a struct that carries the scanned url, response and response body string
 type Page struct {
-	Url  url.URL       // Page url
+	URL  *url.URL      // Page url
 	Resp http.Response // Page response as returned from the GET request
 	Body string        // Response body string
 }
@@ -67,440 +63,265 @@ type Page struct {
 // Channels is a Page channels map where the index is the response code so we can define different behavior for the different resp codes
 type Channels map[int]chan Page
 
-// Number of workers
-var cr int = 0 // Number of workers
-func worker(c *Crawler) {
-	cr++
-	cr := cr
-	log.Info("Worker ", cr, " started")
-	c.IncrWorkersCount()
-	defer log.Info("Worker ", cr, " stopped")
-	defer func() {
-		c.DecrWorkersCount()
-	}()
-	empty := 0
-	for {
-		select {
-		case <-(*c.ctx).Done():
-			log.Debug("Worker ", cr, " is closing due to context")
-			return
-		default:
-			c.WaitDelay()
-			ustring, depth := c.fetchFromQueue()
-			if len(ustring) == 0 {
-				if empty >= 10 {
-					return
-				}
-				empty++
-				time.Sleep(2 * time.Second)
-				c.ProduceDelay()
-				continue
-			}
-
-			url, err := url.Parse(ustring)
-			if err != nil {
-				log.Error("Unable to parse url")
-			}
-			if url.Host == c.config.Root.Host {
-				log.Debug("Worker ", cr, " is scanning url: ", url.String())
-				go func() {
-					err := c.scanUrl(url, depth)
-					if err != nil {
-						log.Error("Error scanning url: " + err.Error())
-					}
-				}()
-				log.Debug("Worker ", cr, " finished scanning url: ", url.String())
-			}
-		}
+// NewCrawler initializes a new Crawler
+func NewCrawler(config Config, queue queue.QueueInterface) (*Crawler, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cookie jar: %v", err)
 	}
-}
 
-// New is the crawler inicialization method
-func New(parentCtx context.Context, config *Config) (*Crawler, error) {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // Be cautious with this in production
+	}
+
+	if config.ProxyURL != "" {
+		proxyURL, err := url.Parse(config.ProxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse proxy URL: %v", err)
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Jar:       jar,
+		Timeout:   config.RequestTimeout,
+		Transport: transport,
 	}
+	robots.GlobalRobotsCache.SetClient(client)
 
-	ctx, cancel := context.WithCancel(parentCtx)
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     fmt.Sprintf("%s:%d", config.RedisAddress, config.RedisPort),
-		Password: config.RedisPass, // no password set
-		DB:       config.RedisDb,   // use default DB
-	})
-	res, _ := rdb.Ping(ctx).Result()
-	if res != "PONG" {
-		os.Exit(1)
-	}
-	crawler := &Crawler{
-		client:    client,
-		ctx:       &ctx,
-		cancel:    &cancel,
-		rdb:       rdb,
-		config:    config,
-		delay:     time.Duration(config.Delay) * time.Second,
-		delayChan: make(chan bool),
-	}
-	if config.Throttle > 0 {
-		crawler.loadControl = make(chan bool, config.Throttle)
-	}
-	return crawler, nil
+	return &Crawler{
+		config:     config,
+		httpClient: client,
+		robotsData: make(map[string]*robotstxt.RobotsData),
+		visited:    make(map[string]bool),
+		queue:      queue,
+		//queue:      make(chan CrawlItem, config.ConcurrentRequests*10), // Buffered channel
+	}, nil
 }
 
-func (c *Crawler) StoreScannedItem(item string) {
-	key := c.getRedisKey("checked")
-	c.rdb.RPush(*c.ctx, key, item)
+// getRandomUserAgent selects a random User-Agent
+func (c *Crawler) getRandomUserAgent() string {
+	if len(c.config.UserAgents) == 0 {
+		return "GoCrawler/1.0 (+http://example.com/bot.html)" // Default if none provided
+	}
+	return c.config.UserAgents[rand.Intn(len(c.config.UserAgents))]
 }
 
-func (c *Crawler) ScannedItemsCount() int64 {
-	key := c.getRedisKey("checked")
-	res, err := c.rdb.LLen(*c.ctx, key).Result()
+// canCrawl checks robots.txt for permission
+func (c *Crawler) canCrawl(targetURL string) bool {
+	return robots.IsURLAllowed(targetURL)
+}
+
+// fetch performs the HTTP GET request
+func (c *Crawler) fetch(targetURL string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
-		log.Error("Unable to get list length")
+		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
-	return res
-}
-
-func (c *Crawler) Done() <-chan struct{} {
-	return (*c.ctx).Done()
-}
-
-func (c *Crawler) Close() {
-	log.Info("Closing")
-	c.ClearQueue()
-	c.ResetWorkersCount()
-	(*c.cancel)()
-	c.rdb.Close()
-}
-
-// Run is the crawler start method
-func (c *Crawler) Run() {
-	allowed, delay := robots.IsURLAllowed((*c.config.Root).String())
-	if c.getQueueSize() == 0 {
-		fmt.Println("Parsing sitemap for: ", (*c.config.Root).String())
-		c.processSitemap()
-		if allowed {
-			fmt.Println("Adding root url: ", (*c.config.Root).String())
-			c.addToQueue((*c.config.Root).String(), c.config.MaxQueueEntry)
-			time.Sleep(1 * time.Second)
-		}
-		c.ResetWorkersCount()
+	for key, value := range c.config.Headers {
+		req.Header.Set(key, value)
 	}
-	if delay.Microseconds() > c.delay.Microseconds() {
-		c.delay = delay
-		go func() {
-			if c.config.DelayListener != nil {
-				select {
-				case c.config.DelayListener <- delay.Seconds():
-				case <-(*c.ctx).Done():
-				}
-			}
-		}()
+	req.Header.Set("User-Agent", c.getRandomUserAgent())
+	// Add other headers if needed (e.g., Accept-Language)
+
+	log.Printf("Fetching: %s", targetURL)
+	resp, err := c.httpClient.Do(req)
+
+	// Basic retry logic
+	for i := 0; i < c.config.MaxRetries && (err != nil || (resp != nil && resp.StatusCode >= 500)); i++ {
+		log.Printf("Retrying (%d/%d) %s due to error: %v or status: %s", i+1, c.config.MaxRetries, targetURL, err, resp.Status)
+		time.Sleep(time.Second * time.Duration(2*(i+1))) // Exponential backoff
+		resp, err = c.httpClient.Do(req)
 	}
-	go c.ProduceDelay()
 
-	log.Info(fmt.Sprintf("Queue size: %d\n", c.getQueueSize()))
-	log.Info(fmt.Sprintf("Scanned items: %d\n", c.ScannedItemsCount()))
-	log.Info(fmt.Sprintf("%+v\n", c))
-	log.Info(fmt.Sprintf("%+v\n", *c.config))
-	go func() {
-		reps := 0
-		for {
-			select {
-			case <-(*c.ctx).Done():
-				log.Debug("Crawler is closing")
-				return
-			default:
-				count := c.GetActiveWorkersCount()
-				if c.getQueueSize() > 0 && (c.config.MaxWorkers == 0 || count < c.config.MaxWorkers) {
-					go worker(c)
-				} else if c.getQueueSize() == 0 && count == 0 {
-					log.Info("Crawler is done. closing\n")
-					if delay.Seconds() > 0 {
-						time.Sleep(delay)
-					} else {
-						time.Sleep(1 * time.Second)
-					}
-					reps++
-					if reps > 15 {
-						c.Close()
-					}
-				} else {
-					//fmt.Printf("Crawler %s is waiting for workers to finish %d\n", c.config.Root.String(), c.getQueueSize())
-					time.Sleep(1 * time.Second)
-				}
-			}
-		}
-	}()
-}
-
-func (c *Crawler) processSitemap() {
-	sitemaps, err := robots.GetSitemaps((*c.config.Root).String())
 	if err != nil {
-		log.Error("Failed to fetch sitemaps list")
-	} else {
-		urls := make([]robots.URL, 0)
-		for _, sitemap := range sitemaps {
-			list := robots.ExtractURLs(sitemap)
-			urls = append(urls, list...)
-		}
-		for _, url := range urls {
-			if allowed, _ := robots.IsURLAllowed(url.Loc); allowed {
-				c.addToQueue(url.Loc, 1)
-			}
-		}
+		return nil, fmt.Errorf("failed after %d retries for %s: %v", c.config.MaxRetries, targetURL, err)
 	}
+	return resp, nil
 }
 
-var bmux sync.Mutex
-
-func (c *Crawler) scanUrl(u *url.URL, level int) error {
-	if u.String() != "" && !strings.Contains(u.String(), "javascript:") {
-		if c.config.Throttle > 0 {
-			c.loadControl <- true
-			defer func() {
-				<-c.loadControl
-			}()
-		}
-		log.Debug("Requesting url: ", u.String())
-		req, err := http.NewRequest("GET", u.String(), nil)
-		if err != nil {
-			log.Error("unable to create request: " + err.Error())
-			return fmt.Errorf("unable to create request %+v", err)
-		}
-		for key, value := range c.config.Headers {
-			req.Header.Set(key, value)
-		}
-		resp, err := c.client.Do(req)
-		if err != nil {
-			return fmt.Errorf("unable to fetch url %+v", err)
-		}
-		if resp.StatusCode == 429 {
-			c.delayLock.Lock()
-			if c.delay.Nanoseconds() == 0 {
-				fmt.Println("Producing delay")
-				go c.ProduceDelay()
-			}
-			c.delay = time.Duration(c.delay.Seconds()+1) * time.Second
-			<-time.After(5 * time.Second)
-			c.delayLock.Unlock()
-		}
-		if resp.StatusCode < 300 {
-			c.StoreScannedItem(u.String())
-		}
-		log.Debug("Received response: ", resp.Status, u.String())
-		bmux.Lock()
-		c.rdb.IncrBy(*c.ctx, "bandwidthused", resp.ContentLength)
-		bmux.Unlock()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Error("unable to read page body: " + err.Error())
-		}
-		resp.Body.Close()
-		log.Debug("Processing body")
-		bodyReader := strings.NewReader(string(body))
-		if err != nil {
-			body = []byte{}
-		}
-		page := Page{Url: *u, Resp: *resp, Body: string(body)}
-		process := true
-		for _, filter := range c.config.Filters {
-			log.Debug("Applying filter to page: ", u.String(), process)
-			process = process && filter(page, c.config)
-		}
-		if process {
-			if channel, exists := c.config.Channels[resp.StatusCode]; exists {
-				log.Debug("Sending page to channel: ", u.String())
-				channel <- page
-			}
-			if level > 0 && len(resp.Header["Content-Type"]) > 0 && strings.HasPrefix(resp.Header["Content-Type"][0], "text/html") {
-				dur := duration()
-				doc, err := html.Parse(bodyReader)
-				if err != nil {
-					log.Error("unable to parse page body: " + err.Error())
-					return fmt.Errorf("unable to parse page body")
-				}
-				log.Debug("Scanning nodes: ", u.String())
-				c.scanNode(doc, level)
-				log.Debug(fmt.Sprintf("Node scan for %s done in %v\n", u.String(), dur()))
-			}
-		}
-
+// process processes a single URL
+func (c *Crawler) process(item queue.CrawlItem) {
+	if item.Depth > c.config.MaxDepth {
+		log.Printf("Max depth reached for %s", item.URL)
+		return
 	}
-	return nil
-}
 
-func (c *Crawler) scanNode(n *html.Node, level int) {
-	if n.Type == html.ElementNode && n.Data == "a" {
-		for _, a := range n.Attr {
-			if a.Key == "href" {
-				if u, err := url.Parse(strings.Trim(a.Val, " ")); err == nil {
-					u, err := c.repairUrl(u)
-					if allowed, _ := robots.IsURLAllowed(u.String()); allowed && err == nil && u.String() != "" && !strings.Contains(u.String(), "javascript:") && !c.containsString(u.String()) {
-						log.Debug("Adding url to queue channel: ", u.String())
-						c.addToQueue(u.String(), level-1)
-					}
-				} else {
-					log.Error("unable to parse url: " + err.Error())
-				}
+	// Check if already visited
+	c.visitedLock.Lock()
+	if c.visited[item.URL] {
+		c.visitedLock.Unlock()
+		return
+	}
+	c.visited[item.URL] = true
+	c.visitedLock.Unlock()
+
+	// Respect robots.txt
+	if !c.canCrawl(item.URL) {
+		log.Printf("Disallowed by robots.txt: %s", item.URL)
+		return
+	}
+
+	// Implement domain-specific delay
+	// More sophisticated rate limiting would be per-host, not global.
+	time.Sleep(c.config.CrawlDelay)
+	log.Println(item.URL)
+	resp, err := c.fetch(item.URL)
+	if err != nil {
+		log.Printf("Failed to fetch %s: %v", item.URL, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	log.Printf("Fetched [%d]: %s", resp.StatusCode, item.URL)
+
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
+			log.Printf("Blocked or rate limited for %s (Status %d). Consider increasing delay or changing IP/UA.", item.URL, resp.StatusCode)
+			// Could implement logic here to slow down even more, or stop for this domain
+			// For simplicity, we just log and return
+			return
+		}
+		log.Printf("Failed to fetch %s: Status %s", item.URL, resp.Status)
+		return
+	}
+
+	// Check content type if necessary
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+		log.Printf("Skipping non-HTML content: %s", item.URL)
+		return
+	}
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		log.Printf("Failed to parse HTML from %s: %v", item.URL, err)
+		return
+	}
+
+	// Find and process links
+	baseURL, _ := url.Parse(item.URL)
+	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if !exists {
+			return
+		}
+		// Resolve relative URLs
+		resolvedURL, err := baseURL.Parse(href)
+		if err != nil {
+			log.Printf("Error resolving URL %s from base %s: %v", href, baseURL, err)
+			return
+		}
+		absURL := resolvedURL.String()
+		absURL = strings.Split(absURL, "#")[0] // Remove fragment
+		// Check if URL is within allowed domains
+		isAllowed := false
+		for _, domain := range c.config.AllowedDomains {
+			if strings.Contains(resolvedURL.Host, domain) {
+				isAllowed = true
 				break
 			}
 		}
-	}
-	for child := n.FirstChild; child != nil; child = child.NextSibling {
-		c.scanNode(child, level)
+		if isAllowed {
+			c.visitedLock.Lock()
+			if !c.visited[absURL] {
+				c.visitedLock.Unlock() // Unlock before sending to avoid deadlock if channel is full
+				if item.Depth+1 <= c.config.MaxDepth {
+					c.wg.Add(1)
+					go func() {
+						defer c.wg.Done()
+						c.queue.Add(queue.CrawlItem{URL: absURL, Depth: item.Depth + 1})
+					}()
+				}
+			} else {
+				c.visitedLock.Unlock()
+			}
+		}
+	})
+
+	// --- TODO: Extract desired data from the page here ---
+	// Example: title := doc.Find("title").First().Text()
+	// fmt.Printf("Title of %s: %s\n", item.URL, title)
+
+	if channel, exists := c.config.Channels[resp.StatusCode]; exists {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			slog.Error("unable to read page body: " + err.Error())
+		}
+		page := Page{URL: baseURL, Resp: *resp, Body: string(body)}
+		channel <- page
 	}
 }
 
-func (c *Crawler) repairUrl(u *url.URL) (url.URL, error) {
-	if u.Scheme == "javascript" || (u.Host == "" && u.Path == "") {
-		return *u, fmt.Errorf("href is not an url")
-	}
-	if u.Host != "" && u.Host != c.config.Root.Host {
-		return *u, fmt.Errorf("host outside of this site: %v", c.config.Root.Host)
-	}
-	if u.Scheme == "" {
-		u.Scheme = c.config.Root.Scheme
-	}
-	if u.Path != "" && u.Host == "" {
-		u.Host = c.config.Root.Host
-	}
-	if u.Scheme == "" {
-		return *u, fmt.Errorf("url incorrect")
-	}
-	if u.Path == "" {
-		u.Path = "/"
-	}
-	if !c.config.ScanParents && !strings.HasPrefix(u.String(), c.config.Root.String()) {
-		return *u, fmt.Errorf("path is parent")
-	}
-	return *u, nil
-
-}
-
-func (c *Crawler) addToQueue(item string, depth int) {
-	key := c.getRedisKey("queue")
-	c.queueLock.Lock()
-	defer c.queueLock.Unlock()
-	log.Debug("Adding to queue ", item)
-	added, err := c.rdb.ZAdd(*c.ctx, key, redis.Z{Member: item, Score: 1}).Result()
-	if err == nil && added > 0 {
-		depthsKey := c.getRedisKey("depths")
-		c.rdb.HSet(*c.ctx, depthsKey, item, strconv.Itoa(depth))
-	}
-}
-
-func (c *Crawler) fetchFromQueue() (string, int) {
-	key := c.getRedisKey("queue")
-	c.queueLock.Lock()
-	defer c.queueLock.Unlock()
-	res, err := c.rdb.ZPopMin(*c.ctx, key).Result()
+func (c *Crawler) processSitemap() {
+	sitemaps, err := robots.GetSitemaps(c.config.StartURL)
 	if err != nil {
-		log.Error(err)
-	}
-	if len(res) == 0 {
-		return "", 0
-	}
-	mem := res[0].Member.(string)
-	depthsKey := c.getRedisKey("depths")
-	d, err := c.rdb.HGet(*c.ctx, depthsKey, mem).Result()
-	if err != nil {
-		return "", 0
-	}
-	depth, err := strconv.Atoi(d)
-	if err != nil {
-		return "", 0
-	}
-	c.rdb.HDel(*c.ctx, depthsKey, mem).Result()
-	return mem, depth
-}
-
-func (c *Crawler) containsString(item string) bool {
-	key := c.getRedisKey("checked")
-	_, err := c.rdb.LPos(*c.ctx, key, item, redis.LPosArgs{}).Result()
-	return err == nil
-}
-
-func (c *Crawler) getRedisKey(prefix string) string {
-	return fmt.Sprintf("%s:%d:%s", prefix, c.config.Id, c.config.Root.Hostname())
-}
-
-func (c *Crawler) getQueueSize() int64 {
-	key := c.getRedisKey("queue")
-	c.queueLock.Lock()
-	defer c.queueLock.Unlock()
-	res, err := c.rdb.ZCard(*c.ctx, key).Result()
-	if err != nil {
-		log.Error("Unable to get list length")
-	}
-	return res
-}
-
-func (c *Crawler) ClearQueue() {
-	key := c.getRedisKey("queue")
-	c.queueLock.Lock()
-	defer c.queueLock.Unlock()
-	c.rdb.Del(*c.ctx, key).Result()
-}
-
-func (c *Crawler) ResetWorkersCount() {
-	c.countLock.Lock()
-	defer c.countLock.Unlock()
-	redisWorkerKey := c.getRedisKey("workers")
-	c.rdb.Set(*c.ctx, redisWorkerKey, 0, 0)
-}
-
-func (c *Crawler) IncrWorkersCount() {
-	c.countLock.Lock()
-	defer c.countLock.Unlock()
-	redisWorkerKey := c.getRedisKey("workers")
-	c.rdb.Incr(*c.ctx, redisWorkerKey)
-}
-func (c *Crawler) DecrWorkersCount() {
-	c.countLock.Lock()
-	defer c.countLock.Unlock()
-	redisWorkerKey := c.getRedisKey("workers")
-	c.rdb.IncrBy(*c.ctx, redisWorkerKey, -1)
-}
-
-func (c *Crawler) GetActiveWorkersCount() int {
-	c.countLock.Lock()
-	defer c.countLock.Unlock()
-	redisWorkerKey := c.getRedisKey("workers")
-	res, err := c.rdb.Get(*c.ctx, redisWorkerKey).Result()
-	if err != nil {
-		log.Fatal("Failed to get workers count from redis")
-	}
-	count, err := strconv.Atoi(res)
-	if err != nil {
-		log.Fatal("Failed to get workers count")
-	}
-	return count
-}
-
-func (c *Crawler) WaitDelay() {
-	if c.delayed && c.delay.Nanoseconds() > 0 {
-		<-c.delayChan
-	}
-}
-
-func (c *Crawler) ProduceDelay() {
-	if !c.delayed && c.delay.Nanoseconds() > 0 {
-		c.delayed = true
-		for {
-			select {
-			case <-(*c.ctx).Done():
-				return
-			default:
-				time.Sleep(c.delay)
-				c.delayChan <- true
+		slog.Error("Failed to fetch sitemaps list")
+	} else {
+		URLs := make([]robots.URL, 0)
+		for _, sitemap := range sitemaps {
+			list := robots.ExtractURLs(sitemap)
+			URLs = append(URLs, list...)
+		}
+		for _, URL := range URLs {
+			if allowed := robots.IsURLAllowed(URL.Loc); allowed {
+				c.queue.Add(queue.CrawlItem{URL: URL.Loc, Depth: 0})
 			}
 		}
 	}
 }
 
-func duration() func() time.Duration {
-	start := time.Now()
-	return func() time.Duration {
-		return time.Since(start)
+// Start begins the crawling process
+func (c *Crawler) Start() {
+	c.wg.Add(1) // For the initial URL
+	go func() {
+		defer c.wg.Done()
+		allowed := robots.IsURLAllowed(c.config.StartURL)
+		if allowed {
+			log.Printf("Url %s is allowed. Entering queue", c.config.StartURL)
+			c.queue.Add(queue.CrawlItem{URL: c.config.StartURL, Depth: 0})
+		}
+		log.Println("Parsing sitemap for: ", c.config.StartURL)
+		c.processSitemap()
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	// Start worker goroutines
+	for i := 0; i < c.config.ConcurrentRequests; i++ {
+		c.wg.Add(1)
+		go func(workerID int) {
+			defer c.wg.Done()
+			for {
+				i++
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(c.config.QueueIdleTimeout):
+					return
+				case items := <-c.queue.Fetch(100):
+					if len(items) == 0 && c.queue.Size() == 0 {
+						return
+					}
+					for _, item := range items {
+						c.process(item)
+					}
+				}
+			}
+		}(i)
 	}
+
+	// Wait for all items to be processed.
+	// This simple wait group might not be perfect for dynamic queueing;
+	// a more robust solution involves checking queue size and active workers.
+	// For this example, ensure wg.Add is called before sending to queue.
+	go func() {
+		// Close queue when all initial + discovered items are done
+		c.wg.Wait()
+		c.queue.Close()
+		cancel()
+	}()
+
+	<-ctx.Done()
+	time.Sleep(3 * time.Second)
+	// Keep main alive until queue is closed and workers are done (they exit when queue closes)
+	// A simple way to wait for workers to finish after queue is closed:
+	// // This is a simplistic wait for workers, proper worker lifecycle mgmt is more complex.
+	log.Println("Crawling finished.")
 }

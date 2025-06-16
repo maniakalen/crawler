@@ -1,18 +1,23 @@
 package robots
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"sync"
 	"time"
 
+	"log/slog"
+
 	"github.com/temoto/robotstxt"
 )
 
 type RobotsCache struct {
-	cache     map[string]*robotsEntry
-	mutex     sync.RWMutex
-	RobotName string
+	cache      map[string]*robotsEntry
+	mutex      sync.RWMutex
+	RobotName  string
+	httpClient *http.Client
 }
 
 type robotsEntry struct {
@@ -26,8 +31,12 @@ var GlobalRobotsCache = &RobotsCache{
 	cache: make(map[string]*robotsEntry),
 }
 
+func (rc *RobotsCache) SetClient(client *http.Client) {
+	rc.httpClient = client
+}
+
 // Fetch and parse robots.txt with caching
-func (rc *RobotsCache) GetRobotsForDomain(domain string) (*robotsEntry, error) {
+func (rc *RobotsCache) GetRobotsForDomain(scheme string, domain string) (*robotsEntry, error) {
 	rc.mutex.RLock()
 	entry, exists := rc.cache[domain]
 	rc.mutex.RUnlock()
@@ -39,20 +48,22 @@ func (rc *RobotsCache) GetRobotsForDomain(domain string) (*robotsEntry, error) {
 	}
 
 	// Fetch new robots.txt
-	robotsURL := "https://" + domain + "/robots.txt"
-	resp, err := http.Get(robotsURL)
+	robotsURL := fmt.Sprintf("%s://%s/robots.txt", scheme, domain)
+
+	req, err := http.NewRequest("GET", robotsURL, nil)
 	if err != nil {
-		// Handle error, default to permissive
+		slog.Error("failed to generate robots request")
+	}
+	resp, err := rc.httpClient.Do(req)
+	if err != nil {
 		return createEmptyRobotsEntry(), err
 	}
 	defer resp.Body.Close()
-
 	// Parse robots.txt
 	robots, err := robotstxt.FromResponse(resp)
 	if err != nil {
-		return createEmptyRobotsEntry(), err
+		log.Println(err.Error())
 	}
-
 	// Extract crawl delay
 	crawlDelay := extractCrawlDelay(robots, rc.RobotName)
 
@@ -73,29 +84,21 @@ func (rc *RobotsCache) GetRobotsForDomain(domain string) (*robotsEntry, error) {
 }
 
 // Check if URL is allowed
-func IsURLAllowed(targetURL string) (bool, time.Duration) {
+func IsURLAllowed(targetURL string) bool {
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		return false, 0
+		return false
 	}
-
-	domain := parsedURL.Hostname()
-	robotsEntry, err := GlobalRobotsCache.GetRobotsForDomain(domain)
+	robotsEntry, err := GlobalRobotsCache.GetRobotsForDomain(parsedURL.Scheme, parsedURL.Host)
 	if err != nil {
-		// Default to allowed but with conservative delay
-		return true, 10 * time.Second
+		return false
 	}
 
 	path := parsedURL.Path
 	if path == "" {
 		path = "/"
 	}
-
-	// Check if path is allowed for our user agent
-	group := robotsEntry.data.FindGroup(GlobalRobotsCache.RobotName)
-	allowed := group.Test(path)
-
-	return allowed, robotsEntry.crawlDelay
+	return robotsEntry.data.TestAgent(targetURL, GlobalRobotsCache.RobotName)
 }
 
 func GetSitemaps(targetURL string) ([]string, error) {
@@ -104,8 +107,7 @@ func GetSitemaps(targetURL string) ([]string, error) {
 		return nil, err
 	}
 
-	domain := parsedURL.Hostname()
-	robotsEntry, err := GlobalRobotsCache.GetRobotsForDomain(domain)
+	robotsEntry, err := GlobalRobotsCache.GetRobotsForDomain(parsedURL.Scheme, parsedURL.Host)
 	if err != nil {
 		// Default to allowed but with conservative delay
 		return nil, err

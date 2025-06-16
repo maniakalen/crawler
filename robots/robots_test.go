@@ -11,44 +11,39 @@ import (
 func TestRobotsCacheIsURLAllowed(t *testing.T) {
 	GlobalRobotsCache.RobotName = "LinkCompass"
 	tests := []struct {
-		name               string
-		domain             string
-		robotstxt          string
-		testUrl            string
-		expectedAllowed    bool
-		expectedCrawlDelay float64
+		name            string
+		domain          string
+		robotstxt       string
+		testUrl         string
+		expectedAllowed bool
 	}{
 		{
-			name:               "Test title",
-			domain:             "testsite",
-			robotstxt:          "User-agent: *\nCrawl-delay: 60",
-			testUrl:            "https://testsite/",
-			expectedAllowed:    true,
-			expectedCrawlDelay: 60,
+			name:            "Test title",
+			domain:          "testsite",
+			robotstxt:       "User-agent: *\nCrawl-delay: 60",
+			testUrl:         "https://testsite/",
+			expectedAllowed: true,
 		},
 		{
-			name:               "Test title",
-			domain:             "testsite",
-			robotstxt:          "User-agent: LinkCompass\nDisallow: /\nCrawl-delay: 60",
-			testUrl:            "https://testsite/",
-			expectedAllowed:    false,
-			expectedCrawlDelay: 60,
+			name:            "Test title",
+			domain:          "testsite",
+			robotstxt:       "User-agent: LinkCompass\nDisallow: /\nCrawl-delay: 60",
+			testUrl:         "https://testsite/",
+			expectedAllowed: false,
 		},
 		{
-			name:               "Test title",
-			domain:             "testsite",
-			robotstxt:          "User-agent: LinkCompass\nDisallow: /\nCrawl-delay: 60",
-			testUrl:            "https://testsite/page1",
-			expectedAllowed:    false,
-			expectedCrawlDelay: 60,
+			name:            "Test title",
+			domain:          "testsite",
+			robotstxt:       "User-agent: LinkCompass\nDisallow: /\nCrawl-delay: 60",
+			testUrl:         "https://testsite/page1",
+			expectedAllowed: false,
 		},
 		{
-			name:               "Test title",
-			domain:             "testsite",
-			robotstxt:          "User-agent: LinkCompass\nDisallow: /page2\nCrawl-delay: 60",
-			testUrl:            "https://testsite/page1",
-			expectedAllowed:    true,
-			expectedCrawlDelay: 60,
+			name:            "Test title",
+			domain:          "testsite",
+			robotstxt:       "User-agent: LinkCompass\nDisallow: /page2\nCrawl-delay: 60",
+			testUrl:         "https://testsite/page1",
+			expectedAllowed: true,
 		},
 	}
 	for _, tt := range tests {
@@ -63,9 +58,8 @@ func TestRobotsCacheIsURLAllowed(t *testing.T) {
 			botEntry.crawlDelay = data.FindGroup(GlobalRobotsCache.RobotName).CrawlDelay
 			GlobalRobotsCache.cache[tt.domain] = botEntry
 
-			allowed, delay := IsURLAllowed(tt.testUrl)
+			allowed := IsURLAllowed(tt.testUrl)
 			assert.Equal(t, tt.expectedAllowed, allowed)
-			assert.Equal(t, tt.expectedCrawlDelay, delay.Seconds())
 		})
 	}
 }
