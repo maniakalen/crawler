@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -47,7 +48,7 @@ func TestNewCrawler(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.ProxyURL = "http://localhost:8080"
 
-	crawler, err := NewCrawler(cfg, queue.NewChannelQueue())
+	crawler, err := NewCrawler(cfg, queue.NewChannelQueue(context.Background()))
 	if err != nil {
 		t.Fatalf("NewCrawler() error = %v, wantErr %v", err, false)
 	}
@@ -70,7 +71,7 @@ func TestNewCrawler(t *testing.T) {
 
 	// Test invalid proxy URL
 	cfg.ProxyURL = "::invalid_url"
-	_, err = NewCrawler(cfg, queue.NewChannelQueue())
+	_, err = NewCrawler(cfg, queue.NewChannelQueue(context.Background()))
 	if err == nil {
 		t.Errorf("NewCrawler() with invalid proxy URL, error = nil, wantErr true")
 	}
@@ -79,7 +80,7 @@ func TestNewCrawler(t *testing.T) {
 // TestGetRandomUserAgent tests the User-Agent rotation
 func TestGetRandomUserAgent(t *testing.T) {
 	cfg := newTestConfig()
-	crawler, _ := NewCrawler(cfg, queue.NewChannelQueue())
+	crawler, _ := NewCrawler(cfg, queue.NewChannelQueue(context.Background()))
 
 	ua1 := crawler.getRandomUserAgent()
 	ua2 := crawler.getRandomUserAgent()
@@ -93,7 +94,7 @@ func TestGetRandomUserAgent(t *testing.T) {
 
 	// Test default UA
 	cfg.UserAgents = []string{}
-	crawlerNoUA, _ := NewCrawler(cfg, queue.NewChannelQueue())
+	crawlerNoUA, _ := NewCrawler(cfg, queue.NewChannelQueue(context.Background()))
 	defaultUA := crawlerNoUA.getRandomUserAgent()
 	if defaultUA != "GoCrawler/1.0 (+http://example.com/bot.html)" {
 		t.Errorf("getRandomUserAgent() with no UAs = %s, want default", defaultUA)
@@ -212,7 +213,7 @@ func TestProcessURL(t *testing.T) {
 			cfg.AllowedDomains = tt.allowedDomains
 			// Use a single concurrent request for predictable queue/visited counts in test
 			cfg.ConcurrentRequests = 1
-			cqueue := queue.NewChannelQueue()
+			cqueue := queue.NewChannelQueue(context.Background())
 			crawler, _ := NewCrawler(cfg, cqueue)
 			// Ensure robots.txt checks use the mock server
 			crawler.httpClient = server.Client()
@@ -300,7 +301,7 @@ func TestStartCrawl(t *testing.T) {
 	cfg.ConcurrentRequests = 2
 	cfg.CrawlDelay = 1 * time.Millisecond
 
-	crawler, err := NewCrawler(cfg, queue.NewChannelQueue())
+	crawler, err := NewCrawler(cfg, queue.NewChannelQueue(context.Background()))
 	if err != nil {
 		t.Fatalf("Failed to create crawler: %v", err)
 	}

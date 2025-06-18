@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -55,7 +56,7 @@ func (c *RedisQueue) getRedisKey(prefix string) string {
 	return fmt.Sprintf("%s:%d:%s", prefix, c.ID, c.Host)
 }
 
-func (c *RedisQueue) Size() int64 {
+func (c *RedisQueue) Size() int {
 	key := c.getRedisKey("queue")
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -63,59 +64,71 @@ func (c *RedisQueue) Size() int64 {
 	if err != nil {
 		slog.Error("Unable to get list length")
 	}
-	return res
+	return int(res)
 }
 
-func (c *RedisQueue) Reset() {
+func (c *RedisQueue) Reset() bool {
 	key := c.getRedisKey("queue")
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	c.rdb.Del(c.ctx, key).Result()
+	return true
 }
 
-func (c *RedisQueue) Add(item CrawlItem) {
+func (c *RedisQueue) Add(item CrawlItem) bool {
 	key := c.getRedisKey("queue")
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	added, err := c.rdb.ZAdd(c.ctx, key, redis.Z{Member: item, Score: 1}).Result()
+	added, err := c.rdb.ZAdd(c.ctx, key, redis.Z{Member: item.URL, Score: 1}).Result()
 	if err == nil && added > 0 {
 		depthsKey := c.getRedisKey("depths")
 		c.rdb.HSet(c.ctx, depthsKey, item.URL, strconv.Itoa(item.Depth))
 	}
+	return true
 }
 
 func (c *RedisQueue) Fetch(count int64) <-chan []CrawlItem {
-	channel := make(chan []CrawlItem, 1)
-	defer close(channel)
-	key := c.getRedisKey("queue")
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	res, err := c.rdb.ZPopMin(c.ctx, key, count).Result()
-	if err != nil {
-		slog.Error(err.Error())
-	}
-	if len(res) == 0 {
-		return nil
-	}
-	depthsKey := c.getRedisKey("depths")
-	items := make([]CrawlItem, 0)
-	for _, item := range res {
-		mem := item.Member.(string)
+	channel := make(chan []CrawlItem)
+	go func() {
+		defer close(channel)
+		key := c.getRedisKey("queue")
+		c.lock.Lock()
+		defer c.lock.Unlock()
+		res, err := c.rdb.ZPopMin(c.ctx, key, count).Result()
 		if err != nil {
-			return nil
+			slog.Error(err.Error())
 		}
-		d, err := c.rdb.HGet(c.ctx, depthsKey, mem).Result()
-		if err != nil {
-			return nil
+		if len(res) == 0 {
+			return
 		}
-		depth, err := strconv.Atoi(d)
+		fmt.Println("Items length:", len(res))
+		depthsKey := c.getRedisKey("depths")
+		items := make([]CrawlItem, 0)
+		for _, item := range res {
+			mem := item.Member.(string)
+			if err != nil {
+				return
+			}
+			d, err := c.rdb.HGet(c.ctx, depthsKey, mem).Result()
+			if err != nil {
+				fmt.Println(err.Error())
+				return
+			}
+			depth, err := strconv.Atoi(d)
 
-		if err != nil {
-			return nil
+			if err != nil {
+				fmt.Println(err.Error())
+				return
+			}
+			c.rdb.HDel(c.ctx, depthsKey, mem).Result()
+			items = append(items, CrawlItem{URL: mem, Depth: depth})
 		}
-		c.rdb.HDel(c.ctx, depthsKey, mem).Result()
-		items = append(items, CrawlItem{URL: mem, Depth: depth})
-	}
-	channel <- items
+		channel <- items
+	}()
+	time.Sleep(1 * time.Second)
 	return channel
+}
+
+func (c *RedisQueue) Close() {
+	c.rdb.Close()
 }

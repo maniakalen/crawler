@@ -37,6 +37,7 @@ type Config struct {
 	Channels           Channels
 	Headers            map[string]string
 	LanguageCode       string
+	Filters            []func(Page, *Config) bool
 }
 
 // Crawler represents the web crawler
@@ -142,6 +143,7 @@ func (c *Crawler) fetch(targetURL string) (*http.Response, error) {
 
 // process processes a single URL
 func (c *Crawler) process(item queue.CrawlItem) {
+	fmt.Println("Processing: ", item.URL)
 	if item.Depth > c.config.MaxDepth {
 		log.Printf("Max depth reached for %s", item.URL)
 		return
@@ -199,55 +201,63 @@ func (c *Crawler) process(item queue.CrawlItem) {
 
 	// Find and process links
 	baseURL, _ := url.Parse(item.URL)
-	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
-		href, exists := s.Attr("href")
-		if !exists {
-			return
-		}
-		// Resolve relative URLs
-		resolvedURL, err := baseURL.Parse(href)
-		if err != nil {
-			log.Printf("Error resolving URL %s from base %s: %v", href, baseURL, err)
-			return
-		}
-		absURL := resolvedURL.String()
-		absURL = strings.Split(absURL, "#")[0] // Remove fragment
-		// Check if URL is within allowed domains
-		isAllowed := false
-		for _, domain := range c.config.AllowedDomains {
-			if strings.Contains(resolvedURL.Host, domain) {
-				isAllowed = true
-				break
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		slog.Error("unable to read page body: " + err.Error())
+	}
+	page := Page{URL: baseURL, Resp: *resp, Body: string(body)}
+	process := true
+	for _, filter := range c.config.Filters {
+		process = process && filter(page, &c.config)
+	}
+	if process {
+		doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
+			href, exists := s.Attr("href")
+			if !exists {
+				return
 			}
-		}
-		if isAllowed {
-			c.visitedLock.Lock()
-			if !c.visited[absURL] {
-				c.visitedLock.Unlock() // Unlock before sending to avoid deadlock if channel is full
-				if item.Depth+1 <= c.config.MaxDepth {
-					c.wg.Add(1)
-					go func() {
-						defer c.wg.Done()
-						c.queue.Add(queue.CrawlItem{URL: absURL, Depth: item.Depth + 1})
-					}()
+			// Resolve relative URLs
+			resolvedURL, err := baseURL.Parse(href)
+			if err != nil {
+				log.Printf("Error resolving URL %s from base %s: %v", href, baseURL, err)
+				return
+			}
+			absURL := resolvedURL.String()
+			absURL = strings.Split(absURL, "#")[0] // Remove fragment
+			// Check if URL is within allowed domains
+			isAllowed := false
+			for _, domain := range c.config.AllowedDomains {
+				if strings.Contains(resolvedURL.Host, domain) {
+					isAllowed = true
+					break
 				}
-			} else {
-				c.visitedLock.Unlock()
 			}
-		}
-	})
+			if isAllowed {
+				c.visitedLock.Lock()
+				if !c.visited[absURL] {
+					c.visitedLock.Unlock() // Unlock before sending to avoid deadlock if channel is full
+					if item.Depth+1 <= c.config.MaxDepth {
+						c.wg.Add(1)
+						go func() {
+							defer c.wg.Done()
+							c.queue.Add(queue.CrawlItem{URL: absURL, Depth: item.Depth + 1})
+						}()
+					}
+				} else {
+					c.visitedLock.Unlock()
+				}
+			}
+		})
 
-	// --- TODO: Extract desired data from the page here ---
-	// Example: title := doc.Find("title").First().Text()
-	// fmt.Printf("Title of %s: %s\n", item.URL, title)
+		// --- TODO: Extract desired data from the page here ---
+		// Example: title := doc.Find("title").First().Text()
+		// fmt.Printf("Title of %s: %s\n", item.URL, title)
 
-	if channel, exists := c.config.Channels[resp.StatusCode]; exists {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			slog.Error("unable to read page body: " + err.Error())
+		if channel, exists := c.config.Channels[resp.StatusCode]; exists {
+			log.Println("sending to channel:", resp.StatusCode)
+			channel <- page
+			log.Println("sent to channel:", resp.StatusCode)
 		}
-		page := Page{URL: baseURL, Resp: *resp, Body: string(body)}
-		channel <- page
 	}
 }
 

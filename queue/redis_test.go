@@ -88,7 +88,7 @@ func TestRedisQueueSize(t *testing.T) {
 	for _, item := range items {
 		que.Add(item)
 	}
-	assert.Equal(t, int64(5), que.Size())
+	assert.Equal(t, 5, que.Size())
 }
 
 type MockRedisOption func(ctx context.Context, redis *redis.Client) error
