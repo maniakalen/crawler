@@ -143,7 +143,6 @@ func (c *Crawler) fetch(targetURL string) (*http.Response, error) {
 
 // process processes a single URL
 func (c *Crawler) process(item queue.CrawlItem) {
-	fmt.Println("Processing: ", item.URL)
 	if item.Depth > c.config.MaxDepth {
 		log.Printf("Max depth reached for %s", item.URL)
 		return
@@ -167,7 +166,6 @@ func (c *Crawler) process(item queue.CrawlItem) {
 	// Implement domain-specific delay
 	// More sophisticated rate limiting would be per-host, not global.
 	time.Sleep(c.config.CrawlDelay)
-	log.Println(item.URL)
 	resp, err := c.fetch(item.URL)
 	if err != nil {
 		log.Printf("Failed to fetch %s: %v", item.URL, err)
