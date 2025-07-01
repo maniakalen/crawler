@@ -130,7 +130,7 @@ func (c *Crawler) fetch(targetURL string) (*http.Response, error) {
 
 	// Basic retry logic
 	for i := 0; i < c.config.MaxRetries && (err != nil || (resp != nil && resp.StatusCode >= 500)); i++ {
-		log.Printf("Retrying (%d/%d) %s due to error: %v or status: %s", i+1, c.config.MaxRetries, targetURL, err, resp.Status)
+		log.Printf("Retrying (%d/%d) %s due to error or bad status", i+1, c.config.MaxRetries, targetURL)
 		time.Sleep(time.Second * time.Duration(2*(i+1))) // Exponential backoff
 		resp, err = c.httpClient.Do(req)
 	}
