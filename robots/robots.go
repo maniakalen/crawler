@@ -1,6 +1,7 @@
 package robots
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -53,6 +54,7 @@ func (rc *RobotsCache) GetRobotsForDomain(scheme string, domain string) (*robots
 	req, err := http.NewRequest("GET", robotsURL, nil)
 	if err != nil {
 		slog.Error("failed to generate robots request")
+		return nil, errors.New("failet do generate robots")
 	}
 	resp, err := rc.httpClient.Do(req)
 	if err != nil {

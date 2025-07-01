@@ -147,7 +147,7 @@ func (c *Crawler) process(item queue.CrawlItem) {
 		log.Printf("Max depth reached for %s", item.URL)
 		return
 	}
-
+	log.Println("Processing: ", item.URL)
 	// Check if already visited
 	c.visitedLock.Lock()
 	if c.visited[item.URL] {
@@ -269,7 +269,7 @@ func (c *Crawler) processSitemap() {
 			URLs = append(URLs, list...)
 		}
 		for _, URL := range URLs {
-			if allowed := robots.IsURLAllowed(URL.Loc); allowed {
+			if allowed := c.canCrawl(URL.Loc); allowed {
 				c.queue.Add(queue.CrawlItem{URL: URL.Loc, Depth: 0})
 			}
 		}
@@ -278,10 +278,10 @@ func (c *Crawler) processSitemap() {
 
 // Start begins the crawling process
 func (c *Crawler) Start() {
-	c.wg.Add(1) // For the initial URL
-	go func() {
-		defer c.wg.Done()
-		allowed := robots.IsURLAllowed(c.config.StartURL)
+	//c.wg.Add(1) // For the initial URL
+	func() {
+		//defer c.wg.Done()
+		allowed := c.canCrawl(c.config.StartURL)
 		if allowed {
 			log.Printf("Url %s is allowed. Entering queue", c.config.StartURL)
 			c.queue.Add(queue.CrawlItem{URL: c.config.StartURL, Depth: 0})

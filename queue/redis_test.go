@@ -48,7 +48,7 @@ func TestRedisFetchAndAdd(t *testing.T) {
 				options = append(options, WithMockRedisHSet(keyd, item.URL, item.Depth))
 				options = append(options, WithMockRedisHGet(keyd, item.URL))
 			}
-			que := NewRedisQueue(id, host, MockInstance(t, options...))
+			que := NewRedisQueue(context.Background(), id, host, MockInstance(t, options...))
 			for _, it := range tt.queueItemsToAdd {
 				que.Add(it)
 			}
@@ -84,7 +84,7 @@ func TestRedisQueueSize(t *testing.T) {
 		options = append(options, WithMockRedisHSet(keyd, item.URL, item.Depth))
 		options = append(options, WithMockRedisHGet(keyd, item.URL))
 	}
-	que := NewRedisQueue(id, host, MockInstance(t, options...))
+	que := NewRedisQueue(context.Background(), id, host, MockInstance(t, options...))
 	for _, item := range items {
 		que.Add(item)
 	}

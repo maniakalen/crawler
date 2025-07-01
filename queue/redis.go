@@ -37,13 +37,13 @@ func NewRedisConnection(config RedisConnConfig) *redis.Client {
 	})
 	return rdb
 }
-func NewRedisQueue(ID int, host string, rdb *redis.Client) *RedisQueue {
+func NewRedisQueue(ctx context.Context, ID int, host string, rdb *redis.Client) *RedisQueue {
 
 	queue := &RedisQueue{
 		ID:   ID,
 		Host: host,
 		rdb:  rdb,
-		ctx:  context.Background(),
+		ctx:  ctx,
 	}
 	res, _ := rdb.Ping(queue.ctx).Result()
 	if res != "PONG" {
