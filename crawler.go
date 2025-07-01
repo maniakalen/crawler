@@ -172,7 +172,10 @@ func (c *Crawler) process(item queue.CrawlItem) {
 		return
 	}
 	defer resp.Body.Close()
-
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		slog.Error("unable to read page body: " + err.Error())
+	}
 	log.Printf("Fetched [%d]: %s", resp.StatusCode, item.URL)
 
 	if resp.StatusCode != http.StatusOK {
@@ -199,10 +202,6 @@ func (c *Crawler) process(item queue.CrawlItem) {
 
 	// Find and process links
 	baseURL, _ := url.Parse(item.URL)
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		slog.Error("unable to read page body: " + err.Error())
-	}
 	page := Page{URL: baseURL, Resp: *resp, Body: string(body)}
 	process := true
 	for _, filter := range c.config.Filters {
