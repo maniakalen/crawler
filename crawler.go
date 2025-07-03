@@ -74,7 +74,7 @@ func NewCrawler(config Config, queue queue.QueueInterface) (*Crawler, error) {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // Be cautious with this in production
 	}
-
+	transport.MaxIdleConnsPerHost = 100
 	if config.ProxyURL != "" {
 		proxyURL, err := url.Parse(config.ProxyURL)
 		if err != nil {
