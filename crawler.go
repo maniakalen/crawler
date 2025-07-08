@@ -23,21 +23,23 @@ import (
 
 // Config holds crawler configuration
 type Config struct {
-	StartURL           string
-	AllowedDomains     []string // Domains to stay within
-	UserAgents         []string
-	CrawlDelay         time.Duration // Delay between requests to the same domain
-	MaxDepth           int           // Maximum crawl depth
-	MaxRetries         int           // Max retries for a failed request
-	RequestTimeout     time.Duration
-	QueueIdleTimeout   time.Duration
-	ProxyURL           string // e.g., "http://user:pass@host:port"
-	RobotsUserAgent    string // User agent to use for robots.txt checks
-	ConcurrentRequests int    // Number of concurrent fetch workers
-	Channels           Channels
-	Headers            map[string]string
-	LanguageCode       string
-	Filters            []func(Page, *Config) bool
+	StartURL            string
+	AllowedDomains      []string // Domains to stay within
+	UserAgents          []string
+	CrawlDelay          time.Duration // Delay between requests to the same domain
+	MaxDepth            int           // Maximum crawl depth
+	MaxRetries          int           // Max retries for a failed request
+	RequestTimeout      time.Duration
+	QueueIdleTimeout    time.Duration
+	ProxyURL            string // e.g., "http://user:pass@host:port"
+	RobotsUserAgent     string // User agent to use for robots.txt checks
+	ConcurrentRequests  int    // Number of concurrent fetch workers
+	Channels            Channels
+	Headers             map[string]string
+	LanguageCode        string
+	Filters             []func(Page, *Config) bool
+	MaxIdleConnsPerHost int
+	MaxIdleConns        int
 }
 
 // Crawler represents the web crawler
@@ -72,9 +74,11 @@ func NewCrawler(config Config, queue queue.QueueInterface) (*Crawler, error) {
 	}
 
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // Be cautious with this in production
+		MaxIdleConns:        config.MaxIdleConns,
+		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, // Be cautious with this in production
 	}
-	transport.MaxIdleConnsPerHost = 100
+
 	if config.ProxyURL != "" {
 		proxyURL, err := url.Parse(config.ProxyURL)
 		if err != nil {
