@@ -285,12 +285,12 @@ func (c *Crawler) processSitemap() {
 
 func (c *Crawler) rotateProxy() {
 	if len(c.config.Proxies) > 0 {
-		log.Println("Rotating proxies")
 		proxyUrl, err := url.Parse(c.config.Proxies[c.proxyIdx])
 		if err != nil {
 			log.Fatal("Failed to parse proxy server")
 		}
 		c.httpClient.Transport.(*http.Transport).Proxy = http.ProxyURL(proxyUrl)
+		log.Println("Rotating proxies", c.config.Proxies[c.proxyIdx])
 		c.proxyIdx++
 		if c.proxyIdx >= 10 {
 			c.proxyIdx = 0
