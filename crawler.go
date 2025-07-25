@@ -40,17 +40,19 @@ type Config struct {
 	Filters             []func(Page, *Config) bool
 	MaxIdleConnsPerHost int
 	MaxIdleConns        int
+	Proxies             []string
 }
 
 // Crawler represents the web crawler
 type Crawler struct {
-	config      Config
-	httpClient  *http.Client
-	robotsData  map[string]*robotstxt.RobotsData // Host -> RobotsData
-	visited     map[string]bool
-	visitedLock sync.Mutex
-	queue       queue.QueueInterface
-	wg          sync.WaitGroup
+	config        Config
+	robotsData    map[string]*robotstxt.RobotsData // Host -> RobotsData
+	visited       map[string]bool
+	visitedLock   sync.Mutex
+	queue         queue.QueueInterface
+	wg            sync.WaitGroup
+	httpClient    *http.Client
+	proxyIdx      int
 	//queue       chan CrawlItem
 }
 
@@ -76,7 +78,8 @@ func NewCrawler(config Config, queue queue.QueueInterface) (*Crawler, error) {
 	transport := &http.Transport{
 		MaxIdleConns:        config.MaxIdleConns,
 		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, // Be cautious with this in production
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		Proxy:               nil,
 	}
 
 	if config.ProxyURL != "" {
@@ -128,7 +131,7 @@ func (c *Crawler) fetch(targetURL string) (*http.Response, error) {
 	}
 	req.Header.Set("User-Agent", c.getRandomUserAgent())
 	// Add other headers if needed (e.g., Accept-Language)
-
+	c.rotateProxy()
 	log.Printf("Fetching: %s", targetURL)
 	resp, err := c.httpClient.Do(req)
 
@@ -276,6 +279,21 @@ func (c *Crawler) processSitemap() {
 			if allowed := c.canCrawl(URL.Loc); allowed {
 				c.queue.Add(queue.CrawlItem{URL: URL.Loc, Depth: 0})
 			}
+		}
+	}
+}
+
+func (c *Crawler) rotateProxy() {
+	if len(c.config.Proxies) > 0 {
+		log.Println("Rotating proxies")
+		proxyUrl, err := url.Parse(c.config.Proxies[c.proxyIdx])
+		if err != nil {
+			log.Fatal("Failed to parse proxy server")
+		}
+		c.httpClient.Transport.(*http.Transport).Proxy = http.ProxyURL(proxyUrl)
+		c.proxyIdx++
+		if c.proxyIdx >= 10 {
+			c.proxyIdx = 0
 		}
 	}
 }
