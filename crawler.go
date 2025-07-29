@@ -1,8 +1,11 @@
 package crawler
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -37,23 +40,24 @@ type Config struct {
 	Channels            Channels
 	Headers             map[string]string
 	LanguageCode        string
-	Filters             []func(Page, *Config) bool
+	Filters             []func(*Page, *Config) bool
 	MaxIdleConnsPerHost int
 	MaxIdleConns        int
 	Proxies             []string
+	RequireHeadless     bool
 }
 
 // Crawler represents the web crawler
 type Crawler struct {
-	config        Config
-	robotsData    map[string]*robotstxt.RobotsData // Host -> RobotsData
-	visited       map[string]bool
-	visitedLock   sync.Mutex
-	queue         queue.QueueInterface
-	wg            sync.WaitGroup
-	httpClient    *http.Client
-	httpTransport *http.Transport
-	proxyIdx      int
+	config      Config
+	robotsData  map[string]*robotstxt.RobotsData // Host -> RobotsData
+	visited     map[string]bool
+	visitedLock sync.Mutex
+	queue       queue.QueueInterface
+	wg          sync.WaitGroup
+	httpClient  *http.Client
+	proxyIdx    int
+	headless    *Headless
 	//queue       chan CrawlItem
 }
 
@@ -62,8 +66,14 @@ type Crawler struct {
 // Page is a struct that carries the scanned url, response and response body string
 type Page struct {
 	URL  *url.URL      // Page url
-	Resp http.Response // Page response as returned from the GET request
+	Resp *PageResponse // Page response as returned from the GET request
 	Body string        // Response body string
+}
+
+type PageResponse struct {
+	StatusCode int
+	Headers    map[string]any
+	Body       io.Reader
 }
 
 // Channels is a Page channels map where the index is the response code so we can define different behavior for the different resp codes
@@ -97,13 +107,13 @@ func NewCrawler(config Config, queue queue.QueueInterface) (*Crawler, error) {
 		Transport: transport,
 	}
 	robots.GlobalRobotsCache.SetClient(client)
-
 	return &Crawler{
 		config:     config,
 		httpClient: client,
 		robotsData: make(map[string]*robotstxt.RobotsData),
 		visited:    make(map[string]bool),
 		queue:      queue,
+		headless:   NewHeadless(),
 		//queue:      make(chan CrawlItem, config.ConcurrentRequests*10), // Buffered channel
 	}, nil
 }
@@ -149,6 +159,48 @@ func (c *Crawler) fetch(targetURL string) (*http.Response, error) {
 	return resp, nil
 }
 
+func (c *Crawler) fetchPage(URL string) (*Page, error) {
+	if c.config.RequireHeadless {
+		resp, err := c.headless.fetch(URL)
+		if err != nil {
+			slog.Error(err.Error())
+			return &Page{}, errors.New("failed to fetch headless")
+		}
+		return resp, nil
+	}
+	resp, err := c.fetch(URL)
+	if err != nil {
+		return nil, errors.New("failed to fetch")
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.New("failed to read page body")
+	}
+	parsedURL, err := url.Parse(URL)
+	if err != nil {
+		return nil, errors.New("failed to parse url")
+	}
+	m, err := json.Marshal(resp.Header)
+	if err != nil {
+		return nil, errors.New("failed to marshal headers")
+	}
+	var headers map[string]interface{}
+	err = json.Unmarshal(m, &headers)
+	if err != nil {
+		return nil, errors.New("failed to unmarshal headers")
+	}
+	return &Page{
+		URL: parsedURL,
+		Resp: &PageResponse{
+			StatusCode: resp.StatusCode,
+			Headers:    headers,
+			Body:       bytes.NewReader(body),
+		},
+		Body: string(body),
+	}, nil
+}
+
 // process processes a single URL
 func (c *Crawler) process(item queue.CrawlItem) {
 	if item.Depth > c.config.MaxDepth {
@@ -174,43 +226,35 @@ func (c *Crawler) process(item queue.CrawlItem) {
 	// Implement domain-specific delay
 	// More sophisticated rate limiting would be per-host, not global.
 	time.Sleep(c.config.CrawlDelay)
-	resp, err := c.fetch(item.URL)
+	page, err := c.fetchPage(item.URL)
 	if err != nil {
-		log.Printf("Failed to fetch %s: %v", item.URL, err)
+		log.Println("Error: ", err.Error())
 		return
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		slog.Error("unable to read page body: " + err.Error())
-	}
-	log.Printf("Fetched [%d]: %s", resp.StatusCode, item.URL)
+	log.Printf("Fetched [%d]: %s", page.Resp.StatusCode, item.URL)
 
-	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
-			log.Printf("Blocked or rate limited for %s (Status %d). Consider increasing delay or changing IP/UA.", item.URL, resp.StatusCode)
+	if page.Resp.StatusCode != http.StatusOK {
+		if page.Resp.StatusCode == http.StatusTooManyRequests || page.Resp.StatusCode == http.StatusForbidden {
+			log.Printf("Blocked or rate limited for %s (Status %d). Consider increasing delay or changing IP/UA.", item.URL, page.Resp.StatusCode)
 			// Could implement logic here to slow down even more, or stop for this domain
 			// For simplicity, we just log and return
 			return
 		}
-		log.Printf("Failed to fetch %s: Status %s", item.URL, resp.Status)
+		log.Printf("Failed to fetch %s: Status %d", item.URL, page.Resp.StatusCode)
 		return
 	}
 
 	// Check content type if necessary
-	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+	if page.isHtml() {
 		log.Printf("Skipping non-HTML content: %s", item.URL)
 		return
 	}
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	doc, err := goquery.NewDocumentFromReader(page.Resp.Body)
 	if err != nil {
 		log.Printf("Failed to parse HTML from %s: %v", item.URL, err)
 		return
 	}
 
-	// Find and process links
-	baseURL, _ := url.Parse(item.URL)
-	page := Page{URL: baseURL, Resp: *resp, Body: string(body)}
 	process := true
 	for _, filter := range c.config.Filters {
 		process = process && filter(page, &c.config)
@@ -222,9 +266,9 @@ func (c *Crawler) process(item queue.CrawlItem) {
 				return
 			}
 			// Resolve relative URLs
-			resolvedURL, err := baseURL.Parse(href)
+			resolvedURL, err := page.URL.Parse(href)
 			if err != nil {
-				log.Printf("Error resolving URL %s from base %s: %v", href, baseURL, err)
+				log.Printf("Error resolving URL %s from base %s: %v", href, page.URL, err)
 				return
 			}
 			absURL := resolvedURL.String()
@@ -258,10 +302,10 @@ func (c *Crawler) process(item queue.CrawlItem) {
 		// Example: title := doc.Find("title").First().Text()
 		// fmt.Printf("Title of %s: %s\n", item.URL, title)
 
-		if channel, exists := c.config.Channels[resp.StatusCode]; exists {
-			log.Println("sending to channel:", resp.StatusCode)
-			channel <- page
-			log.Println("sent to channel:", resp.StatusCode)
+		if channel, exists := c.config.Channels[page.Resp.StatusCode]; exists {
+			log.Println("sending to channel:", page.Resp.StatusCode)
+			channel <- *page
+			log.Println("sent to channel:", page.Resp.StatusCode)
 		}
 	}
 }
@@ -354,4 +398,20 @@ func (c *Crawler) Start() {
 	// A simple way to wait for workers to finish after queue is closed:
 	// // This is a simplistic wait for workers, proper worker lifecycle mgmt is more complex.
 	log.Println("Crawling finished.")
+}
+
+func (p *Page) isHtml() bool {
+	hdr, ok := p.Resp.Headers["Content-Type"].(string)
+	if ok {
+		return strings.Contains(hdr, "text/html")
+	}
+	hdrs, ok := p.Resp.Headers["Content-Type"].([]string)
+	if ok {
+		for _, hdr := range hdrs {
+			if strings.Contains(hdr, "text/html") {
+				return true
+			}
+		}
+	}
+	return false
 }

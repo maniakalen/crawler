@@ -152,6 +152,7 @@ func TestProcessURL(t *testing.T) {
 		expectedQueueLen     int // Approximate, depends on concurrency and exact link finding
 		expectedVisitedCount int
 		expectErrorForStart  bool
+		requiresHeadless     bool
 	}{
 		{
 			name:                 "SimpleCrawl",
@@ -160,6 +161,7 @@ func TestProcessURL(t *testing.T) {
 			allowedDomains:       []string{strings.Replace(server.URL, "http://", "", 1)},
 			expectedQueueLen:     1, // page2
 			expectedVisitedCount: 1, // page1, page2
+			requiresHeadless:     false,
 		},
 		{
 			name:                 "DepthLimit",
@@ -168,6 +170,7 @@ func TestProcessURL(t *testing.T) {
 			allowedDomains:       []string{strings.Replace(server.URL, "http://", "", 1)},
 			expectedQueueLen:     0,
 			expectedVisitedCount: 1, // page1
+			requiresHeadless:     false,
 		},
 		{
 			name:                 "ExternalLinkIgnored",
@@ -175,7 +178,8 @@ func TestProcessURL(t *testing.T) {
 			maxDepth:             1,
 			allowedDomains:       []string{strings.Replace(server.URL, "http://", "", 1)}, // external.com is not allowed
 			expectedQueueLen:     1,                                                       // page2
-			expectedVisitedCount: 1,                                                       // page1, page2
+			expectedVisitedCount: 1,
+			requiresHeadless:     false, // page1, page2
 		},
 		{
 			name:                 "NoLinks",
@@ -184,6 +188,7 @@ func TestProcessURL(t *testing.T) {
 			allowedDomains:       []string{strings.Replace(server.URL, "http://", "", 1)},
 			expectedQueueLen:     0,
 			expectedVisitedCount: 1,
+			requiresHeadless:     false,
 		},
 		{
 			name:                 "PageNotFound",
@@ -193,6 +198,7 @@ func TestProcessURL(t *testing.T) {
 			expectedQueueLen:     0,
 			expectedVisitedCount: 1,    // Visited (attempted)
 			expectErrorForStart:  true, // Fetch itself will log an error
+			requiresHeadless:     false,
 		},
 		{
 			name:                 "PageForbidden",
@@ -202,6 +208,7 @@ func TestProcessURL(t *testing.T) {
 			expectedQueueLen:     0,
 			expectedVisitedCount: 1, // Visited (attempted)
 			expectErrorForStart:  true,
+			requiresHeadless:     false,
 		},
 	}
 
@@ -211,6 +218,7 @@ func TestProcessURL(t *testing.T) {
 			cfg.StartURL = server.URL + tt.startPath
 			cfg.MaxDepth = tt.maxDepth
 			cfg.AllowedDomains = tt.allowedDomains
+			cfg.RequireHeadless = tt.requiresHeadless
 			// Use a single concurrent request for predictable queue/visited counts in test
 			cfg.ConcurrentRequests = 1
 			cqueue := queue.NewChannelQueue(context.Background())
