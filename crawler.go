@@ -45,6 +45,7 @@ type Config struct {
 	MaxIdleConns        int
 	Proxies             []string
 	RequireHeadless     bool
+	ProcessSitemaps     bool
 }
 
 // Crawler represents the web crawler
@@ -345,17 +346,17 @@ func (c *Crawler) rotateProxy() {
 
 // Start begins the crawling process
 func (c *Crawler) Start() {
-	//c.wg.Add(1) // For the initial URL
-	func() {
-		//defer c.wg.Done()
-		allowed := c.canCrawl(c.config.StartURL)
-		if allowed {
-			log.Printf("Url %s is allowed. Entering queue", c.config.StartURL)
-			c.queue.Add(queue.CrawlItem{URL: c.config.StartURL, Depth: 0})
-		}
-		log.Println("Parsing sitemap for: ", c.config.StartURL)
-		c.processSitemap()
-	}()
+	allowed := c.canCrawl(c.config.StartURL)
+	if allowed {
+		log.Printf("Url %s is allowed. Entering queue", c.config.StartURL)
+		c.queue.Add(queue.CrawlItem{URL: c.config.StartURL, Depth: 0})
+	}
+	if c.config.ProcessSitemaps {
+		func() {
+			log.Println("Parsing sitemap for: ", c.config.StartURL)
+			c.processSitemap()
+		}()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	// Start worker goroutines
 	for i := 0; i < c.config.ConcurrentRequests; i++ {
