@@ -26,26 +26,27 @@ import (
 
 // Config holds crawler configuration
 type Config struct {
-	StartURL            string
-	AllowedDomains      []string // Domains to stay within
-	UserAgents          []string
-	CrawlDelay          time.Duration // Delay between requests to the same domain
-	MaxDepth            int           // Maximum crawl depth
-	MaxRetries          int           // Max retries for a failed request
-	RequestTimeout      time.Duration
-	QueueIdleTimeout    time.Duration
-	ProxyURL            string // e.g., "http://user:pass@host:port"
-	RobotsUserAgent     string // User agent to use for robots.txt checks
-	ConcurrentRequests  int    // Number of concurrent fetch workers
-	Channels            Channels
-	Headers             map[string]string
-	LanguageCode        string
-	Filters             []func(*Page, *Config) bool
-	MaxIdleConnsPerHost int
-	MaxIdleConns        int
-	Proxies             []string
-	RequireHeadless     bool
-	ProcessSitemaps     bool
+	StartURL               string
+	AllowedDomains         []string // Domains to stay within
+	UserAgents             []string
+	CrawlDelay             time.Duration // Delay between requests to the same domain
+	MaxDepth               int           // Maximum crawl depth
+	MaxRetries             int           // Max retries for a failed request
+	RequestTimeout         time.Duration
+	QueueIdleTimeout       time.Duration
+	ProxyURL               string // e.g., "http://user:pass@host:port"
+	RobotsUserAgent        string // User agent to use for robots.txt checks
+	ConcurrentRequests     int    // Number of concurrent fetch workers
+	Channels               Channels
+	Headers                map[string]string
+	LanguageCode           string
+	Filters                []func(*Page, *Config) bool
+	MaxIdleConnsPerHost    int
+	MaxIdleConns           int
+	Proxies                []string
+	RequireHeadless        bool
+	ProcessSitemaps        bool
+	DisableUserAgentHeader bool
 }
 
 // Crawler represents the web crawler
@@ -141,7 +142,9 @@ func (c *Crawler) fetch(targetURL string) (*http.Response, error) {
 	for key, value := range c.config.Headers {
 		req.Header.Set(key, value)
 	}
-	req.Header.Set("User-Agent", c.getRandomUserAgent())
+	if !c.config.DisableUserAgentHeader {
+		req.Header.Set("User-Agent", c.getRandomUserAgent())
+	}
 	// Add other headers if needed (e.g., Accept-Language)
 	c.rotateProxy()
 	log.Printf("Fetching: %s", targetURL)
