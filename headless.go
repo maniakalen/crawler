@@ -22,9 +22,18 @@ func NewHeadless() *Headless {
 }
 
 func (h *Headless) fetch(URL string) (*Page, error) {
-	ctx, cancel := chromedp.NewContext(
-		context.Background(),
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", true),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("disable-web-security", true),
+		chromedp.Flag("disable-features", "VizDisplayCompositor"),
+		chromedp.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+		chromedp.WindowSize(1920, 1080),
 	)
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer cancelAlloc()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 	parsedURL, err := url.Parse(URL)
 	if err != nil {
@@ -37,6 +46,8 @@ func (h *Headless) fetch(URL string) (*Page, error) {
 		chromedp.Navigate(URL),
 		// wait for the page to load
 		chromedp.Sleep(2000*time.Millisecond),
+		// bypass bot detection
+		chromedp.Evaluate(`Object.defineProperty(navigator, 'webdriver', {get: () => undefined})`, nil),
 		// extract the raw HTML from the page
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			// select the root node on the page
