@@ -93,6 +93,9 @@ func NewCrawler(config Config, queue queue.QueueInterface) (*Crawler, error) {
 		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		Proxy:               nil,
+		DisableKeepAlives:   false,
+		DisableCompression:  false,
+		IdleConnTimeout:     90 * time.Second,
 	}
 
 	if config.ProxyURL != "" {
@@ -123,9 +126,37 @@ func NewCrawler(config Config, queue queue.QueueInterface) (*Crawler, error) {
 // getRandomUserAgent selects a random User-Agent
 func (c *Crawler) getRandomUserAgent() string {
 	if len(c.config.UserAgents) == 0 {
-		return "GoCrawler/1.0 (+http://example.com/bot.html)" // Default if none provided
+		// Use realistic browser user agents by default
+		defaultUAs := []string{
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+			"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+		}
+		return defaultUAs[rand.Intn(len(defaultUAs))]
 	}
 	return c.config.UserAgents[rand.Intn(len(c.config.UserAgents))]
+}
+
+// getCloudFrontBypassHeaders returns headers that help bypass CloudFront bot detection
+func (c *Crawler) getCloudFrontBypassHeaders() map[string]string {
+	ua := c.getRandomUserAgent()
+	headers := map[string]string{
+		"User-Agent":                ua,
+		"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+		"Accept-Encoding":           "gzip, deflate, br",
+		"Accept-Language":           "en-US,en;q=0.9",
+		"Cache-Control":             "max-age=0",
+		"Sec-Ch-Ua":                 `"Not A(Brand";v="99", "Google Chrome";v="125", "Chromium";v="125"`,
+		"Sec-Ch-Ua-Mobile":          "?0",
+		"Sec-Ch-Ua-Platform":        "Windows",
+		"Sec-Fetch-Dest":            "document",
+		"Sec-Fetch-Mode":            "navigate",
+		"Sec-Fetch-Site":            "none",
+		"Sec-Fetch-User":            "?1",
+		"Upgrade-Insecure-Requests": "1",
+		"DNT":                       "1",
+	}
+	return headers
 }
 
 // canCrawl checks robots.txt for permission
@@ -139,13 +170,21 @@ func (c *Crawler) fetch(targetURL string) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
+
+	// Apply CloudFront bypass headers
+	bypassHeaders := c.getCloudFrontBypassHeaders()
+	for key, value := range bypassHeaders {
+		req.Header.Set(key, value)
+	}
+
+	// Override with custom headers if provided
 	for key, value := range c.config.Headers {
 		req.Header.Set(key, value)
 	}
-	if !c.config.DisableUserAgentHeader {
-		req.Header.Set("User-Agent", c.getRandomUserAgent())
-	}
-	// Add other headers if needed (e.g., Accept-Language)
+
+	// Set referer to improve legitimacy
+	req.Header.Set("Referer", targetURL)
+
 	c.rotateProxy()
 	log.Printf("Fetching: %s", targetURL)
 	resp, err := c.httpClient.Do(req)
