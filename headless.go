@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/dom"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
 
@@ -27,7 +28,10 @@ func (h *Headless) fetch(URL string) (*Page, error) {
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("disable-web-security", true),
 		chromedp.Flag("disable-features", "VizDisplayCompositor"),
-		chromedp.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("no-first-run", true),
+		chromedp.Flag("no-default-browser-check", true),
+		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"),
 		chromedp.WindowSize(1920, 1080),
 	)
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
@@ -42,12 +46,29 @@ func (h *Headless) fetch(URL string) (*Page, error) {
 	}
 	var html string
 	resp, err := chromedp.RunResponse(ctx,
+		// Enable network to set headers
+		network.Enable(),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return network.SetExtraHTTPHeaders(map[string]interface{}{
+				"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+				"Accept-Encoding":           "gzip, deflate, br",
+				"Accept-Language":           "en-US,en;q=0.9",
+				"Cache-Control":             "max-age=0",
+				"Sec-Ch-Ua":                 `"Not A(Brand";v="99", "Google Chrome";v="125", "Chromium";v="125"`,
+				"Sec-Ch-Ua-Mobile":          "?0",
+				"Sec-Ch-Ua-Platform":        "Windows",
+				"Sec-Fetch-Dest":            "document",
+				"Sec-Fetch-Mode":            "navigate",
+				"Sec-Fetch-Site":            "none",
+				"Sec-Fetch-User":            "?1",
+				"Upgrade-Insecure-Requests": "1",
+				"DNT":                       "1",
+			}).Do(ctx)
+		}),
 		// visit the target page
 		chromedp.Navigate(URL),
 		// wait for the page to load
 		chromedp.Sleep(2000*time.Millisecond),
-		// bypass bot detection
-		chromedp.Evaluate(`Object.defineProperty(navigator, 'webdriver', {get: () => undefined})`, nil),
 		// extract the raw HTML from the page
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			// select the root node on the page
